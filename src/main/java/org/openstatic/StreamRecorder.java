@@ -16,7 +16,8 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Utility that connects to a live Icecast/Shoutcast URL, decodes the audio, and
+ * Utility that connects to a live Icecast/Shoutcast URL or reads audio from
+ * stdin (containerized or raw PCM), decodes the audio, and
  * writes out "clips" whenever the stream is not silent.  Each clip is written
  * to a WAV file inside a folder named for the current date; the filename is the
  * time when the clip began.
@@ -34,6 +35,10 @@ public class StreamRecorder {
     private static final String ANSI_BLUE = "\u001B[34m";
     private static final String ANSI_CYAN = "\u001B[36m";
     private final URL streamUrl;
+    private final InputStream stdinInput;
+    private final boolean stdinMode;
+    private final boolean stdinRawMode;
+    private final AudioFormat stdinRawFormat;
     private final Path baseDir;
     private final double silenceThresholdDb;
     private final double silenceDurationSeconds;
@@ -55,7 +60,56 @@ public class StreamRecorder {
                           int outputChannels,
                           int outputBitDepth,
                           String onWriteProgram) {
+        this(streamUrl, null, false, false, null, streamUrl.getPath(), baseDir, silenceThresholdDb,
+                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+                onWriteProgram);
+    }
+
+    public StreamRecorder(InputStream stdinInput,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth,
+                          String onWriteProgram) {
+        this(null, stdinInput, true, false, null, "stdin", baseDir, silenceThresholdDb,
+                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+                onWriteProgram);
+    }
+
+    public StreamRecorder(InputStream stdinInput,
+                          AudioFormat stdinRawFormat,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth,
+                          String onWriteProgram) {
+        this(null, stdinInput, true, true, stdinRawFormat, "stdin", baseDir, silenceThresholdDb,
+                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+                onWriteProgram);
+    }
+
+    private StreamRecorder(URL streamUrl,
+                           InputStream stdinInput,
+                           boolean stdinMode,
+                           boolean stdinRawMode,
+                           AudioFormat stdinRawFormat,
+                           String initialLabel,
+                           Path baseDir,
+                           double silenceThresholdDb,
+                           double silenceDurationSeconds,
+                           float outputSampleRate,
+                           int outputChannels,
+                           int outputBitDepth,
+                           String onWriteProgram) {
         this.streamUrl = streamUrl;
+        this.stdinInput = stdinInput;
+        this.stdinMode = stdinMode;
+        this.stdinRawMode = stdinRawMode;
+        this.stdinRawFormat = stdinRawFormat;
         this.baseDir = baseDir;
         this.silenceThresholdDb = silenceThresholdDb;
         this.silenceDurationSeconds = silenceDurationSeconds;
@@ -63,7 +117,7 @@ public class StreamRecorder {
         this.outputChannels = outputChannels;
         this.outputBitDepth = outputBitDepth;
         this.onWriteCommand = parseCommandLine(onWriteProgram);
-        this.streamLabel = sanitizeStreamName(streamUrl.getPath());
+        this.streamLabel = sanitizeStreamName(initialLabel);
     }
 
     public void stop() {
@@ -73,6 +127,11 @@ public class StreamRecorder {
 
     public void run() throws Exception {
         logHookConfiguration();
+        if (stdinMode) {
+            runFromStdin();
+            return;
+        }
+
         while (running) {
             try {
                 log("CONNECT", ANSI_BLUE, "Connecting to " + streamUrl);
@@ -87,59 +146,7 @@ public class StreamRecorder {
                                 + ", type=" + valueOrUnknown(conn.getContentType())
                                 + ", bitrate=" + valueOrUnknown(conn.getHeaderField("icy-br")) + " kbps");
                 try (InputStream raw = new BufferedInputStream(conn.getInputStream())) {
-                    AudioInputStream audio = AudioSystem.getAudioInputStream(raw);
-                    AudioFormat baseFormat = audio.getFormat();
-                    log("FORMAT", ANSI_CYAN,
-                            String.format("Input format: %.0f Hz, %d channel(s), %s",
-                                    baseFormat.getSampleRate(),
-                                    baseFormat.getChannels(),
-                                    baseFormat.getEncoding()));
-
-                    AudioFormat decodedFormat = new AudioFormat(
-                            AudioFormat.Encoding.PCM_SIGNED,
-                            baseFormat.getSampleRate(),
-                            16,
-                            baseFormat.getChannels(),
-                            baseFormat.getChannels() * 2,
-                            baseFormat.getSampleRate(),
-                            false);
-
-                    AudioFormat outputFormat = new AudioFormat(
-                            AudioFormat.Encoding.PCM_SIGNED,
-                            outputSampleRate,
-                            outputBitDepth,
-                            outputChannels,
-                            outputChannels * (outputBitDepth / 8),
-                            outputSampleRate,
-                            false);
-
-                    try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
-                        if (AudioSystem.isConversionSupported(outputFormat, decodedFormat)) {
-                            try (AudioInputStream converted = AudioSystem.getAudioInputStream(outputFormat, din)) {
-                                log("READY", ANSI_GREEN,
-                                        String.format(
-                                                "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
-                                                outputFormat.getSampleRate(),
-                                                outputFormat.getChannels(),
-                                                outputFormat.getSampleSizeInBits(),
-                                                silenceThresholdDb,
-                                                silenceDurationSeconds));
-                                processStream(converted, outputFormat);
-                            }
-                        } else {
-                            log("FORMAT", ANSI_YELLOW,
-                                    "Requested output format is not supported by this JVM; using decoded stream format.");
-                            log("READY", ANSI_GREEN,
-                                    String.format(
-                                            "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
-                                            decodedFormat.getSampleRate(),
-                                            decodedFormat.getChannels(),
-                                            decodedFormat.getSampleSizeInBits(),
-                                            silenceThresholdDb,
-                                            silenceDurationSeconds));
-                            processStream(din, decodedFormat);
-                        }
-                    }
+                    processInput(raw);
                 }
             } catch (Exception e) {
                 logError("Connection error: " + e.getMessage());
@@ -148,6 +155,104 @@ public class StreamRecorder {
                     log("RETRY", ANSI_YELLOW, "Retrying in 5 seconds...");
                     Thread.sleep(5000);
                 }
+            }
+        }
+    }
+
+    private void runFromStdin() throws Exception {
+        if (stdinRawMode) {
+            log("CONNECT", ANSI_BLUE, "Reading raw PCM audio from stdin");
+            log("STREAM", ANSI_CYAN,
+                    "Connected: name=" + streamLabel
+                            + ", type=stdin/raw, bitrate=unknown");
+            log("FORMAT", ANSI_CYAN,
+                    String.format("Raw stdin format: %.0f Hz, %d channel(s), %d-bit %s, %s-endian",
+                            stdinRawFormat.getSampleRate(),
+                            stdinRawFormat.getChannels(),
+                            stdinRawFormat.getSampleSizeInBits(),
+                            stdinRawFormat.getEncoding(),
+                            stdinRawFormat.isBigEndian() ? "big" : "little"));
+        } else {
+            log("CONNECT", ANSI_BLUE, "Reading audio from stdin");
+            log("STREAM", ANSI_CYAN,
+                    "Connected: name=" + streamLabel
+                            + ", type=stdin, bitrate=unknown");
+        }
+        try (InputStream raw = new BufferedInputStream(this.stdinInput)) {
+            if (stdinRawMode) {
+                processRawInput(raw);
+            } else {
+                processInput(raw);
+            }
+        }
+        if (running) {
+            log("STOP", ANSI_YELLOW, "stdin ended, recorder exiting.");
+        }
+    }
+
+    private void processInput(InputStream raw) throws Exception {
+        try (AudioInputStream audio = AudioSystem.getAudioInputStream(raw)) {
+            processInput(audio);
+        }
+    }
+
+    private void processRawInput(InputStream raw) throws Exception {
+        try (AudioInputStream audio = new AudioInputStream(raw, this.stdinRawFormat, AudioSystem.NOT_SPECIFIED)) {
+            processInput(audio);
+        }
+    }
+
+    private void processInput(AudioInputStream audio) throws Exception {
+        AudioFormat baseFormat = audio.getFormat();
+        log("FORMAT", ANSI_CYAN,
+                String.format("Input format: %.0f Hz, %d channel(s), %s",
+                        baseFormat.getSampleRate(),
+                        baseFormat.getChannels(),
+                        baseFormat.getEncoding()));
+
+        AudioFormat decodedFormat = new AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                baseFormat.getSampleRate(),
+                16,
+                baseFormat.getChannels(),
+                baseFormat.getChannels() * 2,
+                baseFormat.getSampleRate(),
+                false);
+
+        AudioFormat outputFormat = new AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                outputSampleRate,
+                outputBitDepth,
+                outputChannels,
+                outputChannels * (outputBitDepth / 8),
+                outputSampleRate,
+                false);
+
+        try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
+            if (AudioSystem.isConversionSupported(outputFormat, decodedFormat)) {
+                try (AudioInputStream converted = AudioSystem.getAudioInputStream(outputFormat, din)) {
+                    log("READY", ANSI_GREEN,
+                            String.format(
+                                    "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                                    outputFormat.getSampleRate(),
+                                    outputFormat.getChannels(),
+                                    outputFormat.getSampleSizeInBits(),
+                                    silenceThresholdDb,
+                                    silenceDurationSeconds));
+                    processStream(converted, outputFormat);
+                }
+            } else {
+                log("FORMAT", ANSI_YELLOW,
+                        "Requested output format is not supported by this JVM; using decoded stream format.");
+                log("READY", ANSI_GREEN,
+                        String.format(
+                                "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                                decodedFormat.getSampleRate(),
+                                decodedFormat.getChannels(),
+                                decodedFormat.getSampleSizeInBits(),
+                                silenceThresholdDb,
+                                silenceDurationSeconds));
+                processStream(din, decodedFormat);
             }
         }
     }
@@ -284,13 +389,9 @@ public class StreamRecorder {
     private List<String> buildHookCommand(String wavFile) {
         List<String> command = new ArrayList<>();
         String firstArg = this.onWriteCommand.get(0);
-        if (firstArg.toLowerCase().endsWith(".exe"))
-        {
-            if (firstArg.startsWith("/mnt/c/") || firstArg.startsWith("/mnt/d/") || firstArg.startsWith("/mnt/e/"))
-            {
-                wavFile = wavFile.substring(5,6).toUpperCase() + ":\\" + wavFile.substring(7).replaceAll(Pattern.quote("/./"),"/").replace('/','\\');
-                log("HOOK", ANSI_CYAN, "WSL Path Translated " + wavFile);
-            }
+        if (firstArg.matches("^/mnt/[a-z]/.*") && (firstArg.toLowerCase().endsWith(".exe") || firstArg.toLowerCase().endsWith(".bat") || firstArg.toLowerCase().endsWith(".cmd"))) {
+            wavFile = wavFile.substring(5,6).toUpperCase() + ":\\" + wavFile.substring(7).replaceAll(Pattern.quote("/./"),"/").replace('/','\\');
+            log("HOOK", ANSI_CYAN, "WSL Path Translated " + wavFile);
         }
         command.add(firstArg);
 
