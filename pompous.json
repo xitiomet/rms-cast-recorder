@@ -1,0 +1,13 @@
+{
+    "projectName": "RMSCastRecorder",
+    "domain": "openstatic.org",
+    "projectShortName": "rms-cast-recorder",
+    "mainClassName": "RMSCastRecorderMain",
+    "projectDescription": "A Fun Program",
+    "appType": "cli",
+    "licType": "ACSL",
+    "depJava": "on",
+    "nativeImage": "on",
+    "debianPackage": "on",
+    "generate": "Build my Maven Project STUB"
+}

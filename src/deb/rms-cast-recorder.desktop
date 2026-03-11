@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=RMSCastRecorder
+Comment=A Fun Program
+Exec=/usr/bin/rms-cast-recorder
+Icon=/usr/share/icons/rms-cast-recorder/icon-64.png
+Terminal=true
+Type=Application
+Categories=Utility;Application;
