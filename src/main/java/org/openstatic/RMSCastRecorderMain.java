@@ -26,6 +26,12 @@ public class RMSCastRecorderMain
                 .desc("Silence threshold in dB (default -50)").build());
         options.addOption(Option.builder("s").longOpt("silence").hasArg().argName("SECONDS")
                 .desc("Duration of silence before closing a clip (default 2s)").build());
+        options.addOption(Option.builder("r").longOpt("sample-rate").hasArg().argName("HZ")
+            .desc("Output sample rate in Hz (default 8000)").build());
+        options.addOption(Option.builder("c").longOpt("channels").hasArg().argName("N")
+            .desc("Output channels (1=mono, 2=stereo) (default 1)").build());
+        options.addOption(Option.builder("b").longOpt("bitrate").hasArg().argName("BITS")
+            .desc("Output PCM bit depth in bits (default 16)").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -40,8 +46,28 @@ public class RMSCastRecorderMain
             Files.createDirectories(outDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
+            float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
+            int outputChannels = Integer.parseInt(cmd.getOptionValue("c", "1"));
+            int outputBitDepth = Integer.parseInt(cmd.getOptionValue("b", "16"));
 
-            StreamRecorder recorder = new StreamRecorder(url, outDir, threshold, silenceSeconds);
+            if (outputSampleRate <= 0) {
+                throw new ParseException("sample-rate must be > 0");
+            }
+            if (outputChannels <= 0) {
+                throw new ParseException("channels must be > 0");
+            }
+            if (outputBitDepth <= 0 || outputBitDepth % 8 != 0) {
+                throw new ParseException("bitrate must be a positive multiple of 8 (for PCM bit depth)");
+            }
+
+            StreamRecorder recorder = new StreamRecorder(
+                    url,
+                    outDir,
+                    threshold,
+                    silenceSeconds,
+                    outputSampleRate,
+                    outputChannels,
+                    outputBitDepth);
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();
 

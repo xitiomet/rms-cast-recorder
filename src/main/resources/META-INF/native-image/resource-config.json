@@ -1,6 +1,15 @@
 {
-    "resources": {
-        "includes": []
-    },
-    "bundles": []
+  "resources":{
+  "includes":[
+    {
+      "pattern":"\\QMETA-INF/services/javax.sound.sampled.spi.AudioFileReader\\E"
+    }, 
+    {
+      "pattern":"\\QMETA-INF/services/javax.sound.sampled.spi.FormatConversionProvider\\E"
+    }, 
+    {
+      "pattern":"\\Qjavazoom/jl/decoder/sfd.ser\\E"
+    }
+  ]},
+  "bundles":[]
 }

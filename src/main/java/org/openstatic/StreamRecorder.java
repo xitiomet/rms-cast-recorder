@@ -34,16 +34,29 @@ public class StreamRecorder {
     private final Path baseDir;
     private final double silenceThresholdDb;
     private final double silenceDurationSeconds;
+    private final float outputSampleRate;
+    private final int outputChannels;
+    private final int outputBitDepth;
     private volatile boolean running = true;
     private volatile String streamLabel;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH-mm-ss");
+    private static final DateTimeFormatter LOG_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    public StreamRecorder(URL streamUrl, Path baseDir, double silenceThresholdDb, double silenceDurationSeconds) {
+    public StreamRecorder(URL streamUrl,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth) {
         this.streamUrl = streamUrl;
         this.baseDir = baseDir;
         this.silenceThresholdDb = silenceThresholdDb;
         this.silenceDurationSeconds = silenceDurationSeconds;
+        this.outputSampleRate = outputSampleRate;
+        this.outputChannels = outputChannels;
+        this.outputBitDepth = outputBitDepth;
         this.streamLabel = sanitizeStreamName(streamUrl.getPath());
     }
 
@@ -84,11 +97,37 @@ public class StreamRecorder {
                             baseFormat.getSampleRate(),
                             false);
 
+                    AudioFormat outputFormat = new AudioFormat(
+                            AudioFormat.Encoding.PCM_SIGNED,
+                            outputSampleRate,
+                            outputBitDepth,
+                            outputChannels,
+                            outputChannels * (outputBitDepth / 8),
+                            outputSampleRate,
+                            false);
+
                     try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
+                        AudioInputStream targetDin = din;
+                        AudioFormat activeFormat = decodedFormat;
+                        if (AudioSystem.isConversionSupported(outputFormat, decodedFormat)) {
+                            targetDin = AudioSystem.getAudioInputStream(outputFormat, din);
+                            activeFormat = outputFormat;
+                        } else {
+                            log("FORMAT", ANSI_YELLOW,
+                                    "Requested output format is not supported by this JVM; using decoded stream format.");
+                        }
+
                         log("READY", ANSI_GREEN,
-                                String.format("Monitoring audio, silence threshold %.1f dB for %.1f s",
-                                        silenceThresholdDb, silenceDurationSeconds));
-                        processStream(din, decodedFormat);
+                                String.format(
+                                        "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                                        activeFormat.getSampleRate(),
+                                        activeFormat.getChannels(),
+                                        activeFormat.getSampleSizeInBits(),
+                                        silenceThresholdDb,
+                                        silenceDurationSeconds));
+                        try (AudioInputStream converted = targetDin) {
+                            processStream(converted, activeFormat);
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -234,7 +273,7 @@ public class StreamRecorder {
     }
 
     private void log(String tag, String color, String message) {
-        String prefix = "[" + tag + "] ";
+        String prefix = "[" + LocalTime.now().atDate(LocalDate.now()).format(LOG_TIME_FMT) + "] [" + tag + "] ";
         if (supportsAnsi()) {
             System.out.println(color + prefix + ANSI_RESET + message);
         } else {
@@ -243,7 +282,7 @@ public class StreamRecorder {
     }
 
     private void logError(String message) {
-        String prefix = "[ERROR] ";
+        String prefix = "[" + LocalTime.now().atDate(LocalDate.now()).format(LOG_TIME_FMT) + "] [ERROR] ";
         if (supportsAnsi()) {
             System.err.println(ANSI_RED + prefix + ANSI_RESET + message);
         } else {
