@@ -49,7 +49,7 @@ public class StreamRecorder {
     private volatile boolean running = true;
     private volatile String streamLabel;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
-    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HHmmss");
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
     private static final DateTimeFormatter LOG_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     public StreamRecorder(URL streamUrl,
@@ -335,9 +335,10 @@ public class StreamRecorder {
             Instant instant = Instant.ofEpochMilli(startTimeMs);
             LocalDate date = instant.atZone(ZoneId.systemDefault()).toLocalDate();
             LocalTime time = instant.atZone(ZoneId.systemDefault()).toLocalTime();
-            Path dateDir = baseDir.resolve(date.format(DATE_FMT));
+            String formattedDate = date.format(DATE_FMT);
+            Path dateDir = baseDir.resolve(formattedDate);
             Files.createDirectories(dateDir);
-            String name = time.format(TIME_FMT) + "_" + streamLabel + ".wav";
+            String name = formattedDate + "_" + time.format(TIME_FMT) + "_" + streamLabel + ".wav";
             Path out = dateDir.resolve(name);
             try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
                  AudioInputStream ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize())) {
