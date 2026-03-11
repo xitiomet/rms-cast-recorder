@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -287,7 +288,7 @@ public class StreamRecorder {
         {
             if (firstArg.startsWith("/mnt/c/") || firstArg.startsWith("/mnt/d/") || firstArg.startsWith("/mnt/e/"))
             {
-                wavFile = wavFile.substring(5,1).toUpperCase() + ":]"+ wavFile.substring(7).replace('/','\');
+                wavFile = wavFile.substring(5,6).toUpperCase() + ":\\" + wavFile.substring(7).replaceAll(Pattern.quote("/./"),"/").replace('/','\\');
                 log("HOOK", ANSI_CYAN, "WSL Path Translated " + wavFile);
             }
         }
