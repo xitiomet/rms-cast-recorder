@@ -265,6 +265,7 @@ public class StreamRecorder {
         byte[] buffer = new byte[frameSize * 1024];
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
         long recordedFrames = 0;
+        long soundFrames = 0;
         long silentFrames = 0;
         long chunkStartTime = 0;
         boolean activelyRecording = false;
@@ -280,6 +281,7 @@ public class StreamRecorder {
                 }
                 chunk.write(buffer, 0, n);
                 recordedFrames += n / frameSize;
+                soundFrames += n / frameSize;
                 silentFrames = 0;
                 activelyRecording = true;
             } else {
@@ -292,10 +294,17 @@ public class StreamRecorder {
                     log("SILENCE", ANSI_YELLOW,
                             String.format("Silence reached after %.1f s, closing clip.",
                                     recordedFrames / frameRate));
-                    writeChunk(chunk.toByteArray(), format, chunkStartTime);
+                    if (soundFrames / frameRate > 1.0) { // only write clips that have at least 1 second of sound
+                        writeChunk(chunk.toByteArray(), format, chunkStartTime);
+                    } else {
+                        log("RECORD", ANSI_YELLOW,
+                                String.format("Discarding clip with only %.1f s of sound.",
+                                        soundFrames / frameRate));
+                    }
                     chunk.reset();
                     activelyRecording = false;
                     recordedFrames = 0;
+                    soundFrames = 0;
                     silentFrames = 0;
                 }
             }
