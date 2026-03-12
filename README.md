@@ -82,15 +82,15 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
 
 Exactly one input source is required: `--url` or `--stdin`.
 
-When using `--stdin` without `--stdin-raw`, provide a Java Sound readable stream format (WAV is recommended).
+When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
-Raw format flags (`--stdin-rate`, `--stdin-channels`, `--stdin-bits`, `--stdin-big-endian`, `--stdin-unsigned`) require `--stdin-raw`.
+Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endian, --stdin-unsigned) require --stdin-raw.
 
-Examples for `--on-write`:
+Examples for --on-write:
 
-* `-x /usr/local/bin/on-clip-written.sh`
-* `-x "/usr/local/bin/on-clip-written.sh --tag repeater-a"` (WAV path is still arg1)
-* `-x "/usr/bin/python3 /opt/hooks/process_clip.py {wav} --mode fast"`
+* -x /usr/local/bin/on-clip-written.sh
+* -x "/usr/local/bin/on-clip-written.sh --tag repeater-a" (WAV path is still arg1)
+* -x "/usr/bin/python3 /opt/hooks/process_clip.py {wav} --mode fast"
 
 
 To compile this project please run:
