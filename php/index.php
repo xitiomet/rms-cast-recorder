@@ -5,6 +5,10 @@ $recordingsRoot = '/opt/recordings/';
 $PAGE_TITLE = 'Icecast Stream Recordings';
 $supportedRecordingExtensions = array('wav', 'mp3', 'ogg');
 
+if (file_exists(__DIR__ . '/config.php')) {
+	include __DIR__ . '/config.php';
+}
+
 // End Settings
 
 
