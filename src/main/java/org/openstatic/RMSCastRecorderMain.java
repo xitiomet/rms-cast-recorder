@@ -49,6 +49,8 @@ public class RMSCastRecorderMain
             .desc("Output PCM bit depth in bits (default 16)").build());
         options.addOption(Option.builder("x").longOpt("on-write").hasArg().argName("PROGRAM")
             .desc("Optional hook command run after each WAV write; use {wav} placeholder or WAV is arg1 by default").build());
+        options.addOption(Option.builder("n").longOpt("name").hasArg().argName("STREAM")
+            .desc("Optional stream name override used in filenames (default comes from stream metadata)").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -86,6 +88,7 @@ public class RMSCastRecorderMain
             int outputChannels = Integer.parseInt(cmd.getOptionValue("c", "1"));
             int outputBitDepth = Integer.parseInt(cmd.getOptionValue("b", "16"));
             String onWriteProgram = cmd.getOptionValue("x");
+            String streamNameOverride = cmd.getOptionValue("n");
 
             if (outputSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
@@ -137,7 +140,8 @@ public class RMSCastRecorderMain
                             outputSampleRate,
                             outputChannels,
                             outputBitDepth,
-                            onWriteProgram);
+                            onWriteProgram,
+                            streamNameOverride);
                 } else {
                     recorder = new StreamRecorder(
                             System.in,
@@ -147,7 +151,8 @@ public class RMSCastRecorderMain
                             outputSampleRate,
                             outputChannels,
                             outputBitDepth,
-                            onWriteProgram);
+                            onWriteProgram,
+                            streamNameOverride);
                 }
             } else {
                 recorder = new StreamRecorder(
@@ -158,7 +163,8 @@ public class RMSCastRecorderMain
                         outputSampleRate,
                         outputChannels,
                         outputBitDepth,
-                        onWriteProgram);
+                        onWriteProgram,
+                        streamNameOverride);
             }
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();

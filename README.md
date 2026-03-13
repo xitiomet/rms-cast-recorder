@@ -76,6 +76,7 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
 * -r,--sample-rate <HZ> – output sample rate in Hz (default 8000)
 * -c,--channels <N> – output channels (1 mono, 2 stereo; default 1)
 * -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
+* -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
 * -?,--help – display help and exit
@@ -85,6 +86,12 @@ Exactly one input source is required: `--url` or `--stdin`.
 When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
 Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endian, --stdin-unsigned) require --stdin-raw.
+
+When recording from --url, filenames default to stream metadata (icy-name/x-audiocast-name/ice-name) unless --name is provided.
+
+WAV files include stream name metadata in the title field.
+
+WAV files written from --url input also include a comment metadata field with the original source URL.
 
 Examples for --on-write:
 

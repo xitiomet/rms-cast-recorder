@@ -4,9 +4,13 @@ import javax.sound.sampled.*;
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.time.Instant;
@@ -46,7 +50,9 @@ public class StreamRecorder {
     private final int outputChannels;
     private final int outputBitDepth;
     private final List<String> onWriteCommand;
+    private final String streamNameOverride;
     private volatile boolean running = true;
+    private volatile String streamTitle;
     private volatile String streamLabel;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
@@ -60,9 +66,22 @@ public class StreamRecorder {
                           int outputChannels,
                           int outputBitDepth,
                           String onWriteProgram) {
+        this(streamUrl, baseDir, silenceThresholdDb, silenceDurationSeconds, outputSampleRate,
+                outputChannels, outputBitDepth, onWriteProgram, null);
+    }
+
+    public StreamRecorder(URL streamUrl,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth,
+                          String onWriteProgram,
+                          String streamNameOverride) {
         this(streamUrl, null, false, false, null, streamUrl.getPath(), baseDir, silenceThresholdDb,
                 silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
-                onWriteProgram);
+                onWriteProgram, streamNameOverride);
     }
 
     public StreamRecorder(InputStream stdinInput,
@@ -73,9 +92,22 @@ public class StreamRecorder {
                           int outputChannels,
                           int outputBitDepth,
                           String onWriteProgram) {
+        this(stdinInput, baseDir, silenceThresholdDb, silenceDurationSeconds, outputSampleRate,
+                outputChannels, outputBitDepth, onWriteProgram, null);
+    }
+
+    public StreamRecorder(InputStream stdinInput,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth,
+                          String onWriteProgram,
+                          String streamNameOverride) {
         this(null, stdinInput, true, false, null, "stdin", baseDir, silenceThresholdDb,
                 silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
-                onWriteProgram);
+                onWriteProgram, streamNameOverride);
     }
 
     public StreamRecorder(InputStream stdinInput,
@@ -87,9 +119,23 @@ public class StreamRecorder {
                           int outputChannels,
                           int outputBitDepth,
                           String onWriteProgram) {
+        this(stdinInput, stdinRawFormat, baseDir, silenceThresholdDb, silenceDurationSeconds,
+                outputSampleRate, outputChannels, outputBitDepth, onWriteProgram, null);
+    }
+
+    public StreamRecorder(InputStream stdinInput,
+                          AudioFormat stdinRawFormat,
+                          Path baseDir,
+                          double silenceThresholdDb,
+                          double silenceDurationSeconds,
+                          float outputSampleRate,
+                          int outputChannels,
+                          int outputBitDepth,
+                          String onWriteProgram,
+                          String streamNameOverride) {
         this(null, stdinInput, true, true, stdinRawFormat, "stdin", baseDir, silenceThresholdDb,
                 silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
-                onWriteProgram);
+                onWriteProgram, streamNameOverride);
     }
 
     private StreamRecorder(URL streamUrl,
@@ -104,7 +150,8 @@ public class StreamRecorder {
                            float outputSampleRate,
                            int outputChannels,
                            int outputBitDepth,
-                           String onWriteProgram) {
+                           String onWriteProgram,
+                           String streamNameOverride) {
         this.streamUrl = streamUrl;
         this.stdinInput = stdinInput;
         this.stdinMode = stdinMode;
@@ -117,7 +164,11 @@ public class StreamRecorder {
         this.outputChannels = outputChannels;
         this.outputBitDepth = outputBitDepth;
         this.onWriteCommand = parseCommandLine(onWriteProgram);
-        this.streamLabel = sanitizeStreamName(initialLabel);
+        this.streamNameOverride = isBlank(streamNameOverride) ? null : streamNameOverride.trim();
+        this.streamTitle = normalizeStreamTitle((this.streamNameOverride != null)
+            ? this.streamNameOverride
+            : initialLabel);
+        this.streamLabel = sanitizeStreamName(this.streamTitle);
     }
 
     public void stop() {
@@ -360,12 +411,109 @@ public class StreamRecorder {
                  AudioInputStream ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize())) {
                 AudioSystem.write(ais, AudioFileFormat.Type.WAVE, out.toFile());
             }
+            try {
+                appendWavInfoMetadata(out);
+            } catch (IOException metadataException) {
+                log("WRITE", ANSI_YELLOW,
+                        "Saved clip but could not append WAV metadata: " + metadataException.getMessage());
+            }
             log("WRITE", ANSI_GREEN, "Saved clip: " + out);
             runOnWriteProgram(out.toAbsolutePath());
         } catch (IOException ioe) {
             logError("Failed to write chunk: " + ioe.getMessage());
             ioe.printStackTrace(System.err);
         }
+    }
+
+    private void appendWavInfoMetadata(Path wavPath) throws IOException {
+        String sourceComment = (this.streamUrl == null) ? null : "Source URL: " + this.streamUrl;
+        byte[] listChunk = buildInfoMetadataChunk(this.streamTitle, sourceComment);
+        if (listChunk.length == 0) {
+            return;
+        }
+
+        try (RandomAccessFile wavFile = new RandomAccessFile(wavPath.toFile(), "rw")) {
+            if (!isRiffWaveFile(wavFile)) {
+                throw new IOException("output file is not RIFF/WAVE");
+            }
+
+            long originalLength = wavFile.length();
+            long newLength = originalLength + listChunk.length;
+            long newRiffSize = newLength - 8;
+            if (newRiffSize > 0xFFFFFFFFL) {
+                throw new IOException("WAV file exceeds RIFF size limit after metadata append");
+            }
+
+            wavFile.seek(originalLength);
+            wavFile.write(listChunk);
+            wavFile.seek(4);
+            writeLittleEndianInt(wavFile, (int) newRiffSize);
+        }
+    }
+
+    private static byte[] buildInfoMetadataChunk(String title, String comment) throws IOException {
+        ByteArrayOutputStream infoBody = new ByteArrayOutputStream();
+        appendInfoSubChunk(infoBody, "INAM", title);
+        appendInfoSubChunk(infoBody, "ICMT", comment);
+
+        byte[] infoBodyBytes = infoBody.toByteArray();
+        if (infoBodyBytes.length == 0) {
+            return new byte[0];
+        }
+
+        int listChunkSize = 4 + infoBodyBytes.length;
+        ByteBuffer buffer = ByteBuffer.allocate(8 + listChunkSize).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.put("LIST".getBytes(StandardCharsets.US_ASCII));
+        buffer.putInt(listChunkSize);
+        buffer.put("INFO".getBytes(StandardCharsets.US_ASCII));
+        buffer.put(infoBodyBytes);
+        return buffer.array();
+    }
+
+    private static void appendInfoSubChunk(ByteArrayOutputStream infoBody,
+                                           String chunkId,
+                                           String value) throws IOException {
+        if (isBlank(value)) {
+            return;
+        }
+
+        byte[] textData = value.getBytes(StandardCharsets.UTF_8);
+        byte[] chunkData = Arrays.copyOf(textData, textData.length + 1);
+        infoBody.write(chunkId.getBytes(StandardCharsets.US_ASCII));
+        writeLittleEndianInt(infoBody, chunkData.length);
+        infoBody.write(chunkData);
+        if ((chunkData.length % 2) != 0) {
+            infoBody.write(0);
+        }
+    }
+
+    private static boolean isRiffWaveFile(RandomAccessFile wavFile) throws IOException {
+        if (wavFile.length() < 12) {
+            return false;
+        }
+
+        wavFile.seek(0);
+        byte[] riff = new byte[4];
+        wavFile.readFully(riff);
+        wavFile.seek(8);
+        byte[] wave = new byte[4];
+        wavFile.readFully(wave);
+        return Arrays.equals(riff, "RIFF".getBytes(StandardCharsets.US_ASCII))
+                && Arrays.equals(wave, "WAVE".getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static void writeLittleEndianInt(RandomAccessFile file, int value) throws IOException {
+        file.write(value & 0xFF);
+        file.write((value >>> 8) & 0xFF);
+        file.write((value >>> 16) & 0xFF);
+        file.write((value >>> 24) & 0xFF);
+    }
+
+    private static void writeLittleEndianInt(OutputStream out, int value) throws IOException {
+        out.write(value & 0xFF);
+        out.write((value >>> 8) & 0xFF);
+        out.write((value >>> 16) & 0xFF);
+        out.write((value >>> 24) & 0xFF);
     }
 
     private void runOnWriteProgram(Path wavPath) {
@@ -517,12 +665,22 @@ public class StreamRecorder {
     }
 
     private void updateStreamLabel(HttpURLConnection conn) {
+        if (this.streamNameOverride != null) {
+            this.streamTitle = normalizeStreamTitle(this.streamNameOverride);
+            this.streamLabel = sanitizeStreamName(this.streamTitle);
+            return;
+        }
         String headerName = firstNonBlank(
                 conn.getHeaderField("icy-name"),
                 conn.getHeaderField("x-audiocast-name"),
                 conn.getHeaderField("ice-name"),
                 streamUrl.getPath());
-        this.streamLabel = sanitizeStreamName(headerName);
+        this.streamTitle = normalizeStreamTitle(headerName);
+        this.streamLabel = sanitizeStreamName(this.streamTitle);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 
     private static String firstNonBlank(String... values) {
@@ -535,15 +693,27 @@ public class StreamRecorder {
     }
 
     private static String sanitizeStreamName(String value) {
+        String candidate = normalizeStreamTitle(value);
+        int slashIndex = candidate.lastIndexOf('/');
+        if (slashIndex >= 0 && slashIndex < candidate.length() - 1) {
+            candidate = candidate.substring(slashIndex + 1);
+        }
+        candidate = candidate.replaceAll("[^A-Za-z0-9._-]+", "_");
+        candidate = candidate.replaceAll("_+", "_");
+        candidate = candidate.replaceAll("^_+|_+$", "");
+        if (candidate.isEmpty()) {
+            return "stream";
+        }
+        return candidate;
+    }
+
+    private static String normalizeStreamTitle(String value) {
         String candidate = firstNonBlank(value);
         int slashIndex = candidate.lastIndexOf('/');
         if (slashIndex >= 0 && slashIndex < candidate.length() - 1) {
             candidate = candidate.substring(slashIndex + 1);
         }
-        candidate = candidate.replaceAll("\\.[A-Za-z0-9]{1,5}$", "");
-        candidate = candidate.replaceAll("[^A-Za-z0-9._-]+", "_");
-        candidate = candidate.replaceAll("_+", "_");
-        candidate = candidate.replaceAll("^_+|_+$", "");
+        candidate = candidate.replaceAll("\\.[A-Za-z0-9]{1,5}$", "").trim();
         if (candidate.isEmpty()) {
             return "stream";
         }
