@@ -5,6 +5,9 @@ DIR="/opt/recordings/"   # directory passed as argument, default current directo
 # This script can be setup as a cronjob to automatically convert your wav files into mp3
 # mp3, ogg, and wav are all supported by the php frontend
 
+# THIS SCRIPT REQUIRES THAT exiftool be installed
+# $ sudo apt install -y libimage-exiftool-perl
+
 find "$DIR" -type f -iname "*.wav" | while IFS= read -r wavfile; do
     mp3file="${wavfile%.wav}.mp3"
 
