@@ -8,7 +8,7 @@ A recording will be created as follows:
 
 `./recordings/2026-03-12/2026-03-12_024630_RadPi.wav`
 
-Regular builds can be found at https://openstatic.org/projects/rms-cast-recorder/ (scroll to the bottom)
+Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.org/projects/rms-cast-recorder/#downloads) (scroll to the bottom)
 
 ### Screenshot
 ![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
@@ -17,11 +17,11 @@ Regular builds can be found at https://openstatic.org/projects/rms-cast-recorder
 ![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
 In the subdirectory php is a web interface for browsing and reviewing the recordings. All you need is a php capable web server.
 
+you can edit the index.php or create a config.php file with the following variables:
 ```php
 // Settings
 $recordingsRoot = '/mnt/Media/recordings';
 $PAGE_TITLE = 'Icecast Stream Recordings';
-
 // End Settings
 ```
 
