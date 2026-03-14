@@ -28,7 +28,7 @@ oggfile="${wavFile%.wav}.ogg"
 title=$(exiftool -s3 -Title "$wavFile")
 comment=$(exiftool -s3 -Comment "$wavFile")
 echo "Converting $title: $wavFile -> $oggfile $comment"
-oggenc -t "$title" -c "$comment" "$wavFile" -o "$oggfile" 2> /dev/null
+oggenc -t "$title" -c "CONTACT=$comment" "$wavFile" -o "$oggfile"
 status=$?
 if [ $status -eq 0 ]; then
     rm "$wavFile"
