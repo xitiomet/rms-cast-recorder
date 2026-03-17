@@ -1,7 +1,7 @@
 <?php
 
 // Settings
-$recordingsRoot = '/opt/recordings/';
+$recordingsRoot = __DIR__ . '/recordings/';
 $PAGE_TITLE = 'Radio Stream Recordings';
 $supportedRecordingExtensions = array('wav', 'mp3', 'ogg');
 $authenticate = FALSE; // Set to true to enable basic authentication for access control.
@@ -408,6 +408,473 @@ function sendJsonResponse(array $payload, int $statusCode = 200): void
 
 	echo $encodedPayload;
 	exit;
+}
+
+function getRecordingsAuthorizationHeader(): string
+{
+	if (isset($_SERVER['HTTP_AUTHORIZATION']) && is_string($_SERVER['HTTP_AUTHORIZATION'])) {
+		return trim((string)$_SERVER['HTTP_AUTHORIZATION']);
+	}
+
+	if (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && is_string($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+		return trim((string)$_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+	}
+
+	return '';
+}
+
+function decodeRecordingsBasicAuthorization(string $headerValue): array
+{
+	$empty = array('username' => '', 'password' => '');
+	if ($headerValue === '' || stripos($headerValue, 'Basic ') !== 0) {
+		return $empty;
+	}
+
+	$encodedPart = trim(substr($headerValue, 6));
+	if ($encodedPart === '') {
+		return $empty;
+	}
+
+	$decodedPart = base64_decode($encodedPart, true);
+	if (!is_string($decodedPart) || $decodedPart === '' || strpos($decodedPart, ':') === false) {
+		return $empty;
+	}
+
+	$pair = explode(':', $decodedPart, 2);
+	return array(
+		'username' => trim((string)$pair[0]),
+		'password' => (string)$pair[1],
+	);
+}
+
+function getRecordingsIngestCredentialsFromRequest(): array
+{
+	if (isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])) {
+		return array(
+			'username' => trim((string)$_SERVER['PHP_AUTH_USER']),
+			'password' => (string)$_SERVER['PHP_AUTH_PW'],
+		);
+	}
+
+	$decodedBasic = decodeRecordingsBasicAuthorization(getRecordingsAuthorizationHeader());
+	if ($decodedBasic['username'] !== '' || $decodedBasic['password'] !== '') {
+		return $decodedBasic;
+	}
+
+	$usernameCandidates = array(
+		isset($_POST['username']) ? (string)$_POST['username'] : '',
+		isset($_POST['api_username']) ? (string)$_POST['api_username'] : '',
+		isset($_POST['login_username']) ? (string)$_POST['login_username'] : '',
+	);
+	$passwordCandidates = array(
+		isset($_POST['password']) ? (string)$_POST['password'] : '',
+		isset($_POST['api_password']) ? (string)$_POST['api_password'] : '',
+		isset($_POST['login_password']) ? (string)$_POST['login_password'] : '',
+	);
+
+	$username = '';
+	foreach ($usernameCandidates as $candidate) {
+		$trimmed = trim($candidate);
+		if ($trimmed !== '') {
+			$username = $trimmed;
+			break;
+		}
+	}
+
+	$password = '';
+	foreach ($passwordCandidates as $candidate) {
+		if ((string)$candidate !== '') {
+			$password = (string)$candidate;
+			break;
+		}
+	}
+
+	return array('username' => $username, 'password' => $password);
+}
+
+function recordingsIngestRequestAuthorized(bool $authenticateEnabled): bool
+{
+	if ($authenticateEnabled !== true) {
+		return true;
+	}
+
+	startRecordingsAuthSession();
+	if (recordingsAuthIsLoggedIn()) {
+		return true;
+	}
+
+	$credentials = getRecordingsIngestCredentialsFromRequest();
+	$username = trim((string)$credentials['username']);
+	$password = (string)$credentials['password'];
+	if ($username === '' || $password === '') {
+		recordingsAuthDebugLog('Ingest authentication failed: missing credentials.');
+		return false;
+	}
+
+	$success = verifyRecordingsLogin($username, $password);
+	recordingsAuthDebugLog('Ingest authentication attempt completed.', array(
+		'username' => $username,
+		'success' => $success,
+	));
+	return $success;
+}
+
+function sanitizeRecordingsIngestFilename(string $rawName): string
+{
+	$fileName = basename(str_replace('\\', '/', trim($rawName)));
+	if ($fileName === '') {
+		return '';
+	}
+
+	if (function_exists('iconv')) {
+		$converted = @iconv('UTF-8', 'UTF-8//IGNORE', $fileName);
+		if (is_string($converted) && $converted !== '') {
+			$fileName = $converted;
+		}
+	}
+
+	$fileName = preg_replace('/[[:cntrl:]]+/', '', $fileName) ?? $fileName;
+	$fileName = preg_replace('/[^A-Za-z0-9._-]+/', '_', $fileName) ?? $fileName;
+	$fileName = trim($fileName, " ._-");
+	if ($fileName === '' || $fileName === '.' || $fileName === '..') {
+		return '';
+	}
+
+	$extension = strtolower((string)pathinfo($fileName, PATHINFO_EXTENSION));
+	$baseName = (string)pathinfo($fileName, PATHINFO_FILENAME);
+	$baseName = trim($baseName, " ._-");
+	if ($baseName === '' || $extension === '') {
+		return '';
+	}
+
+	if (strlen($baseName) > 120) {
+		$baseName = substr($baseName, 0, 120);
+	}
+
+	return $baseName . '.' . $extension;
+}
+
+function detectRecordingsDateFolderFromFilename(string $fileName): string
+{
+	$baseName = (string)pathinfo($fileName, PATHINFO_FILENAME);
+
+	if (preg_match('/^(\d{4}-\d{2}-\d{2})(?:$|[_-])/', $baseName, $matches)) {
+		$parts = explode('-', $matches[1]);
+		if (count($parts) === 3 && checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0])) {
+			return $matches[1];
+		}
+	}
+
+	if (preg_match('/^(\d{4})(\d{2})(\d{2})(?:$|[_-])/', $baseName, $matches)) {
+		$year = (int)$matches[1];
+		$month = (int)$matches[2];
+		$day = (int)$matches[3];
+		if (checkdate($month, $day, $year)) {
+			return sprintf('%04d-%02d-%02d', $year, $month, $day);
+		}
+	}
+
+	if (preg_match('/(\d{4})[-_](\d{2})[-_](\d{2})/', $baseName, $matches)) {
+		$year = (int)$matches[1];
+		$month = (int)$matches[2];
+		$day = (int)$matches[3];
+		if (checkdate($month, $day, $year)) {
+			return sprintf('%04d-%02d-%02d', $year, $month, $day);
+		}
+	}
+
+	return date('Y-m-d');
+}
+
+function resolveRecordingsIngestUploadErrorMessage(int $uploadError): string
+{
+	if ($uploadError === UPLOAD_ERR_INI_SIZE || $uploadError === UPLOAD_ERR_FORM_SIZE) {
+		return 'Uploaded recording exceeds server upload limits.';
+	}
+
+	if ($uploadError === UPLOAD_ERR_PARTIAL) {
+		return 'Uploaded recording was only partially received.';
+	}
+
+	if ($uploadError === UPLOAD_ERR_NO_FILE) {
+		return 'No recording file was uploaded.';
+	}
+
+	if ($uploadError === UPLOAD_ERR_NO_TMP_DIR) {
+		return 'Server temporary upload directory is missing.';
+	}
+
+	if ($uploadError === UPLOAD_ERR_CANT_WRITE) {
+		return 'Server failed to write the uploaded recording.';
+	}
+
+	if ($uploadError === UPLOAD_ERR_EXTENSION) {
+		return 'A PHP extension rejected the upload.';
+	}
+
+	return 'Upload failed with error code ' . $uploadError . '.';
+}
+
+function resolveRecordingsIngestUploadRequest(): array
+{
+	if (isset($_FILES) && is_array($_FILES) && count($_FILES) > 0) {
+		$selectedUpload = null;
+		if (isset($_FILES['recording']) && is_array($_FILES['recording'])) {
+			$selectedUpload = $_FILES['recording'];
+		} else {
+			foreach ($_FILES as $uploadCandidate) {
+				if (is_array($uploadCandidate)) {
+					$selectedUpload = $uploadCandidate;
+					break;
+				}
+			}
+		}
+
+		if (is_array($selectedUpload)) {
+			$uploadError = isset($selectedUpload['error']) ? (int)$selectedUpload['error'] : UPLOAD_ERR_NO_FILE;
+			if ($uploadError !== UPLOAD_ERR_OK) {
+				return array(
+					'ok' => false,
+					'status_code' => 400,
+					'error' => resolveRecordingsIngestUploadErrorMessage($uploadError),
+				);
+			}
+
+			$tmpPath = isset($selectedUpload['tmp_name']) ? (string)$selectedUpload['tmp_name'] : '';
+			$originalName = isset($selectedUpload['name']) ? (string)$selectedUpload['name'] : '';
+			if ($tmpPath === '' || $originalName === '') {
+				return array(
+					'ok' => false,
+					'status_code' => 400,
+					'error' => 'Upload payload is incomplete.',
+				);
+			}
+
+			if (!is_uploaded_file($tmpPath)) {
+				return array(
+					'ok' => false,
+					'status_code' => 400,
+					'error' => 'Upload source is invalid.',
+				);
+			}
+
+			return array(
+				'ok' => true,
+				'tmp_path' => $tmpPath,
+				'original_name' => $originalName,
+				'is_uploaded_file' => true,
+				'cleanup' => false,
+			);
+		}
+	}
+
+	$rawBody = file_get_contents('php://input');
+	if (!is_string($rawBody) || $rawBody === '') {
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'error' => 'No recording payload provided.',
+		);
+	}
+
+	$rawName = '';
+	if (isset($_POST['filename']) && is_string($_POST['filename']) && trim($_POST['filename']) !== '') {
+		$rawName = trim((string)$_POST['filename']);
+	} elseif (isset($_GET['filename']) && is_string($_GET['filename']) && trim($_GET['filename']) !== '') {
+		$rawName = trim((string)$_GET['filename']);
+	} elseif (isset($_SERVER['HTTP_X_RECORDING_FILENAME']) && is_string($_SERVER['HTTP_X_RECORDING_FILENAME'])) {
+		$rawName = trim((string)$_SERVER['HTTP_X_RECORDING_FILENAME']);
+	}
+
+	if ($rawName === '') {
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'error' => 'Filename is required when posting raw recording bytes.',
+		);
+	}
+
+	$tmpPath = tempnam(sys_get_temp_dir(), 'recording_ingest_');
+	if ($tmpPath === false) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Failed to allocate temporary upload file.',
+		);
+	}
+
+	if (file_put_contents($tmpPath, $rawBody, LOCK_EX) === false) {
+		@unlink($tmpPath);
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Failed to persist uploaded recording payload.',
+		);
+	}
+
+	return array(
+		'ok' => true,
+		'tmp_path' => $tmpPath,
+		'original_name' => $rawName,
+		'is_uploaded_file' => false,
+		'cleanup' => true,
+	);
+}
+
+function storeRecordingIngestedFile(
+	string $rootDirectory,
+	array $allowedExtensions,
+	string $tmpPath,
+	string $originalName,
+	bool $isUploadedFile
+): array {
+	$sanitizedName = sanitizeRecordingsIngestFilename($originalName);
+	if ($sanitizedName === '') {
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'error' => 'Filename is invalid.',
+		);
+	}
+
+	$extension = strtolower((string)pathinfo($sanitizedName, PATHINFO_EXTENSION));
+	if (!in_array($extension, $allowedExtensions, true)) {
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'error' => 'Unsupported recording type: .' . $extension,
+		);
+	}
+
+	if (!is_dir($rootDirectory) && !mkdir($rootDirectory, 0775, true) && !is_dir($rootDirectory)) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Recordings root directory is not writable.',
+		);
+	}
+
+	$dateFolder = detectRecordingsDateFolderFromFilename($sanitizedName);
+	$targetDir = rtrim($rootDirectory, '/\\') . DIRECTORY_SEPARATOR . $dateFolder;
+	if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Failed to create destination directory for recordings.',
+		);
+	}
+
+	if (!is_writable($targetDir)) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Destination directory is not writable: ' . $targetDir,
+		);
+	}
+
+	$baseName = (string)pathinfo($sanitizedName, PATHINFO_FILENAME);
+	$targetFileName = $sanitizedName;
+	$targetPath = $targetDir . DIRECTORY_SEPARATOR . $targetFileName;
+	for ($suffix = 1; file_exists($targetPath) && $suffix <= 10000; $suffix++) {
+		$targetFileName = $baseName . '_' . $suffix . '.' . $extension;
+		$targetPath = $targetDir . DIRECTORY_SEPARATOR . $targetFileName;
+	}
+
+	if (file_exists($targetPath)) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Failed to allocate a unique destination filename.',
+		);
+	}
+
+	$writeSuccess = false;
+	if ($isUploadedFile) {
+		$writeSuccess = move_uploaded_file($tmpPath, $targetPath);
+	}
+	if (!$writeSuccess) {
+		$writeSuccess = @rename($tmpPath, $targetPath);
+	}
+	if (!$writeSuccess) {
+		$writeSuccess = @copy($tmpPath, $targetPath);
+		if ($writeSuccess) {
+			@unlink($tmpPath);
+		}
+	}
+
+	if (!$writeSuccess || !is_file($targetPath)) {
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'error' => 'Failed to store uploaded recording.',
+		);
+	}
+
+	@chmod($targetPath, 0664);
+	$fileSize = filesize($targetPath);
+
+	return array(
+		'ok' => true,
+		'status_code' => 201,
+		'file_name' => $targetFileName,
+		'date_folder' => $dateFolder,
+		'relative_path' => $dateFolder . '/' . $targetFileName,
+		'size_bytes' => is_int($fileSize) ? $fileSize : 0,
+	);
+}
+
+function handleRecordingsIngestApi(string $rootDirectory, array $allowedExtensions, bool $authenticateEnabled): void
+{
+	$method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string)$_SERVER['REQUEST_METHOD']) : 'GET';
+	if ($method === 'OPTIONS') {
+		header('Allow: POST, OPTIONS');
+		header('Access-Control-Allow-Origin: *');
+		header('Access-Control-Allow-Methods: POST, OPTIONS');
+		header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Recording-Filename');
+		http_response_code(204);
+		exit;
+	}
+
+	if ($method !== 'POST') {
+		header('Allow: POST, OPTIONS');
+		sendJsonResponse(array('ok' => false, 'error' => 'Method not allowed.'), 405);
+	}
+
+	if (!recordingsIngestRequestAuthorized($authenticateEnabled)) {
+		sendJsonResponse(array('ok' => false, 'error' => 'Authentication required for ingest API.'), 401);
+	}
+
+	$upload = resolveRecordingsIngestUploadRequest();
+	if ($upload['ok'] !== true) {
+		sendJsonResponse(array('ok' => false, 'error' => (string)$upload['error']), (int)$upload['status_code']);
+	}
+
+	$saveResult = storeRecordingIngestedFile(
+		$rootDirectory,
+		$allowedExtensions,
+		(string)$upload['tmp_path'],
+		(string)$upload['original_name'],
+		isset($upload['is_uploaded_file']) && $upload['is_uploaded_file'] === true
+	);
+
+	if (isset($upload['cleanup']) && $upload['cleanup'] === true && isset($upload['tmp_path'])) {
+		@unlink((string)$upload['tmp_path']);
+	}
+
+	if ($saveResult['ok'] !== true) {
+		sendJsonResponse(array('ok' => false, 'error' => (string)$saveResult['error']), (int)$saveResult['status_code']);
+	}
+
+	sendJsonResponse(array(
+		'ok' => true,
+		'message' => 'Recording ingested.',
+		'file' => array(
+			'name' => (string)$saveResult['file_name'],
+			'date' => (string)$saveResult['date_folder'],
+			'path' => (string)$saveResult['relative_path'],
+			'size_bytes' => (int)$saveResult['size_bytes'],
+		),
+	), 201);
 }
 
 function normalizeRelativePath(string $relativePath): string
@@ -1839,6 +2306,12 @@ function streamLiveSourceForRecording(string $rootDirectory, array $allowedExten
 }
 
 $ajaxAction = isset($_GET['ajax']) ? (string)$_GET['ajax'] : '';
+$apiAction = isset($_GET['api']) ? trim((string)$_GET['api']) : '';
+
+if ($ajaxAction === 'ingest' || $apiAction === 'recording_ingest') {
+	handleRecordingsIngestApi($recordingsRoot, $supportedRecordingExtensions, $authenticate === true);
+}
+
 enforceRecordingsAuthentication($authenticate === true, $PAGE_TITLE, $ajaxAction);
 if (
 	($ajaxAction === 'stream' || $ajaxAction === 'live_proxy')

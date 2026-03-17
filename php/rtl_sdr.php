@@ -5,6 +5,7 @@ declare(strict_types=1);
 $RTL_PAGE_TITLE = 'RTL-SDR Controller';
 $STATE_FILE = __DIR__ . '/rtl_sdr_state.json';
 $STREAMING_SERVERS_FILE = __DIR__ . '/streaming_servers.json';
+$RECORDING_SERVERS_FILE = __DIR__ . '/recording_servers.json';
 $UI_SETTINGS_FILE = __DIR__ . '/rtl_sdr_ui_settings.json';
 $LOG_DIR = __DIR__ . '/rtl_sdr_logs';
 $recordingsRoot = __DIR__ . '/recordings';
@@ -125,6 +126,145 @@ function save_streaming_servers(string $filePath, array $servers): bool
 	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
 }
 
+function build_url_from_parts(array $parts): string
+{
+	$scheme = isset($parts['scheme']) ? strtolower(trim((string)$parts['scheme'])) : '';
+	$host = isset($parts['host']) ? trim((string)$parts['host']) : '';
+	if ($scheme === '' || $host === '') {
+		return '';
+	}
+
+	$url = $scheme . '://';
+
+	$user = isset($parts['user']) ? (string)$parts['user'] : '';
+	$pass = isset($parts['pass']) ? (string)$parts['pass'] : '';
+	if ($user !== '') {
+		$url .= $user;
+		if ($pass !== '') {
+			$url .= ':' . $pass;
+		}
+		$url .= '@';
+	}
+
+	$url .= $host;
+
+	if (isset($parts['port']) && (int)$parts['port'] > 0) {
+		$url .= ':' . (string)((int)$parts['port']);
+	}
+
+	if (isset($parts['path']) && (string)$parts['path'] !== '') {
+		$url .= (string)$parts['path'];
+	}
+
+	if (isset($parts['query']) && (string)$parts['query'] !== '') {
+		$url .= '?' . (string)$parts['query'];
+	}
+
+	if (isset($parts['fragment']) && (string)$parts['fragment'] !== '') {
+		$url .= '#' . (string)$parts['fragment'];
+	}
+
+	return $url;
+}
+
+function normalize_recording_upload_url(string $rawUrl): string
+{
+	$url = trim($rawUrl);
+	if ($url === '') {
+		return '';
+	}
+
+	$parts = parse_url($url);
+	if (!is_array($parts)) {
+		return $url;
+	}
+
+	$scheme = isset($parts['scheme']) ? strtolower(trim((string)$parts['scheme'])) : '';
+	$host = isset($parts['host']) ? trim((string)$parts['host']) : '';
+	if (!in_array($scheme, array('http', 'https'), true) || $host === '') {
+		return $url;
+	}
+
+	$queryParams = array();
+	if (isset($parts['query']) && (string)$parts['query'] !== '') {
+		parse_str((string)$parts['query'], $queryParams);
+		if (!is_array($queryParams)) {
+			$queryParams = array();
+		}
+	}
+
+	if (!isset($queryParams['api']) || trim((string)$queryParams['api']) === '') {
+		$queryParams['api'] = 'recording_ingest';
+	}
+
+	$parts['query'] = http_build_query($queryParams, '', '&', PHP_QUERY_RFC3986);
+	$rebuilt = build_url_from_parts($parts);
+	return $rebuilt === '' ? $url : $rebuilt;
+}
+
+function normalize_recording_servers(array $rawServers): array
+{
+	$normalized = array();
+	foreach ($rawServers as $serverId => $server) {
+		if (!is_array($server)) {
+			continue;
+		}
+		$id = trim((string)$serverId);
+		if ($id === '') {
+			continue;
+		}
+
+		$name = trim((string)($server['name'] ?? ''));
+		$url = normalize_recording_upload_url((string)($server['url'] ?? ''));
+		$username = trim((string)($server['username'] ?? ''));
+		$password = (string)($server['password'] ?? '');
+
+		if ($name === '' || $url === '') {
+			continue;
+		}
+
+		$normalized[$id] = array(
+			'name' => $name,
+			'url' => $url,
+			'username' => $username,
+			'password' => $password,
+		);
+	}
+
+	return $normalized;
+}
+
+function load_recording_servers(string $filePath): array
+{
+	if (!file_exists($filePath)) {
+		file_put_contents($filePath, "{}\n", LOCK_EX);
+		return array();
+	}
+
+	$raw = file_get_contents($filePath);
+	if (!is_string($raw) || trim($raw) === '') {
+		return array();
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return array();
+	}
+
+	return normalize_recording_servers($decoded);
+}
+
+function save_recording_servers(string $filePath, array $servers): bool
+{
+	$normalized = normalize_recording_servers($servers);
+	$encoded = json_encode($normalized, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return false;
+	}
+
+	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
+}
+
 function default_ui_settings(): array
 {
 	return array(
@@ -214,6 +354,10 @@ function ui_settings_for_response(array $settings): array
 
 if (!file_exists($STREAMING_SERVERS_FILE)) {
 	file_put_contents($STREAMING_SERVERS_FILE, "{}\n", LOCK_EX);
+}
+
+if (!file_exists($RECORDING_SERVERS_FILE)) {
+	file_put_contents($RECORDING_SERVERS_FILE, "{}\n", LOCK_EX);
 }
 
 function parse_json_request_body(): array
@@ -319,6 +463,46 @@ function sanitize_device_label(string $label, string $fallback): string
 	return $clean;
 }
 
+function normalize_device_serial(string $rawSerial): string
+{
+	$serial = trim($rawSerial);
+	if ($serial === '') {
+		return '';
+	}
+
+	$serial = preg_replace('/[^A-Za-z0-9._-]+/', '', $serial) ?? '';
+	return trim($serial);
+}
+
+function extract_device_serial(string $text): string
+{
+	if (preg_match('/(?:^|[,\s])SN:\s*([A-Za-z0-9._-]+)/i', $text, $matches) !== 1) {
+		return '';
+	}
+
+	return normalize_device_serial((string)$matches[1]);
+}
+
+function lookup_device_serial(string $deviceId): string
+{
+	$scan = discover_rtl_devices();
+	$devices = isset($scan['devices']) && is_array($scan['devices']) ? $scan['devices'] : array();
+	foreach ($devices as $device) {
+		if (!is_array($device) || (string)($device['index'] ?? '') !== $deviceId) {
+			continue;
+		}
+
+		$serial = normalize_device_serial((string)($device['serial'] ?? ''));
+		if ($serial !== '') {
+			return $serial;
+		}
+
+		return extract_device_serial((string)($device['label'] ?? ''));
+	}
+
+	return '';
+}
+
 function read_log_excerpt(string $logPath, int $maxLines = 12): string
 {
 	if (!file_exists($logPath)) {
@@ -349,6 +533,13 @@ function strip_ansi_sequences(string $text): string
 function mask_sensitive_command_for_log(string $command): string
 {
 	$masked = preg_replace("/(icecast:\/\/[^:\\s\"'\/]+:)[^@\\s\"'\/]+@/", '$1***@', $command);
+	if (!is_string($masked)) {
+		$masked = $command;
+	}
+	$masked = preg_replace("/(https?:\/\/[^:\\s\"'\/]+:)[^@\\s\"'\/]+@/i", '$1***@', $masked);
+	if (is_string($masked)) {
+		$masked = preg_replace("/(--user\\s+)(\"[^\"]*\"|'[^']*'|\\S+)/i", '$1***:***', $masked);
+	}
 	return is_string($masked) ? $masked : $command;
 }
 
@@ -539,6 +730,11 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		$streamName = 'RTLSDR Device ' . $deviceId . ' (' . strtoupper($mode) . ' ' . $frequency . ')';
 	}
 
+	$deviceSerial = normalize_device_serial((string)($input['deviceSerial'] ?? ''));
+	if ($deviceSerial === '') {
+		$deviceSerial = lookup_device_serial($deviceId);
+	}
+
 	if ($outputMode === 'stream') {
 		if ($streamTarget === '') {
 			throw new RuntimeException('Target server:port is required in Stream output mode.');
@@ -570,7 +766,65 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		}
 	}
 
-	$postCommand = trim((string)($input['postCommand'] ?? ''));
+	$afterRecordAction = strtolower(trim((string)($input['afterRecordAction'] ?? '')));
+	$postCommandArg = trim((string)($input['postCommandArg'] ?? ($input['postCommand'] ?? '')));
+	$recordingServerId = trim((string)($input['recordingServerId'] ?? ''));
+	$recordingUploadUrl = normalize_recording_upload_url((string)($input['recordingUploadUrl'] ?? ''));
+	$recordingUploadUsername = trim((string)($input['recordingUploadUsername'] ?? ''));
+	$recordingUploadPassword = trim((string)($input['recordingUploadPassword'] ?? ''));
+
+	if ($afterRecordAction === '') {
+		$afterRecordAction = $postCommandArg !== '' ? 'command' : 'none';
+	}
+
+	$allowedAfterRecordActions = array('none', 'upload', 'upload_delete', 'command');
+	if (!in_array($afterRecordAction, $allowedAfterRecordActions, true)) {
+		throw new RuntimeException('After Record mode must be one of: ' . implode(', ', $allowedAfterRecordActions));
+	}
+
+	$usesUploadAfterRecord = in_array($afterRecordAction, array('upload', 'upload_delete'), true);
+
+	if ($outputMode !== 'recorder') {
+		$afterRecordAction = 'none';
+		$postCommandArg = '';
+		$recordingServerId = '';
+		$recordingUploadUrl = '';
+		$recordingUploadUsername = '';
+		$recordingUploadPassword = '';
+	}
+
+	if ($outputMode === 'recorder' && $afterRecordAction === 'command' && $postCommandArg === '') {
+		throw new RuntimeException('After Record command argument is required in Run Command mode.');
+	}
+
+	if ($outputMode === 'recorder' && $usesUploadAfterRecord) {
+		if ($recordingUploadUrl === '') {
+			throw new RuntimeException('Upload server URL is required in After Record Upload mode.');
+		}
+
+		$uploadUrlValid = filter_var($recordingUploadUrl, FILTER_VALIDATE_URL);
+		if ($uploadUrlValid === false) {
+			throw new RuntimeException('Upload server URL is invalid. Example: https://host/recordings/');
+		}
+
+		$uploadUrlParts = parse_url($recordingUploadUrl);
+		$uploadScheme = isset($uploadUrlParts['scheme']) ? strtolower((string)$uploadUrlParts['scheme']) : '';
+		if (!in_array($uploadScheme, array('http', 'https'), true)) {
+			throw new RuntimeException('Upload server URL must start with http:// or https://');
+		}
+
+		if (($recordingUploadUsername === '' && $recordingUploadPassword !== '') || ($recordingUploadUsername !== '' && $recordingUploadPassword === '')) {
+			throw new RuntimeException('Provide both upload username and password, or leave both empty.');
+		}
+
+		if ($recordingUploadUsername !== '' && preg_match('/[\s\r\n]/', $recordingUploadUsername)) {
+			throw new RuntimeException('Upload username contains invalid whitespace characters.');
+		}
+
+		if ($recordingUploadPassword !== '' && preg_match('/[\s\r\n]/', $recordingUploadPassword)) {
+			throw new RuntimeException('Upload password contains invalid whitespace characters.');
+		}
+	}
 
 	return array(
 		'device' => $deviceId,
@@ -591,7 +845,14 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'streamPassword' => $streamPassword,
 		'outputDir' => $outputDir,
 		'streamName' => $streamName,
-		'postCommand' => $postCommand,
+		'deviceSerial' => $deviceSerial,
+		'afterRecordAction' => $afterRecordAction,
+		'postCommandArg' => $postCommandArg,
+		'postCommand' => $postCommandArg,
+		'recordingServerId' => $recordingServerId,
+		'recordingUploadUrl' => $recordingUploadUrl,
+		'recordingUploadUsername' => $recordingUploadUsername,
+		'recordingUploadPassword' => $recordingUploadPassword,
 	);
 }
 
@@ -599,8 +860,7 @@ function build_silence_padder_command(int $sampleRate): string
 {
 	// Outputs silence (zero bytes) at the correct byte rate when the upstream pipe
 	// stops writing (e.g. rtl_fm squelch mutes). This runs as a fixed-frame clock
-	// with a tiny jitter buffer so downstream audio cadence stays smooth, and emits
-	// [RX] ACTIVE / [RX] IDLE markers to stderr for UI state detection.
+	// with a tiny jitter buffer so downstream audio cadence stays smooth.
 	$frameSeconds = 0.01; // 10 ms frame
 	$chunkBytes = max(1, (int)round($sampleRate * 2 * $frameSeconds));
 	$lines = array(
@@ -652,7 +912,6 @@ function build_silence_padder_command(int $sampleRate): string
 		'    rx=1',
 		'    high=0',
 		'    low=0',
-		'    os.write(2,b"[RX] ACTIVE\\n")',
 		'  else:',
 		'   high=0',
 		' else:',
@@ -663,14 +922,38 @@ function build_silence_padder_command(int $sampleRate): string
 		'    rx=0',
 		'    low=0',
 		'    high=0',
-		'    os.write(2,b"[RX] IDLE\\n")',
 		'  else:',
 		'   low=0',
-		' os.write(ofd,out)',
+		' try:',
+		'  os.write(ofd,out)',
+		' except BrokenPipeError:',
+		'  break',
 		' r=t-time.monotonic()',
 		' if r>0:time.sleep(r)',
 	);
 	return 'python3 -c ' . escapeshellarg(implode("\n", $lines));
+}
+
+function build_signal_description(array $config): string
+{
+	$description = (string)$config['frequency'] . ' BW ' . (string)$config['rtlBandwidth'] . ' ' . strtoupper((string)$config['mode']);
+	$deviceSerial = normalize_device_serial((string)($config['deviceSerial'] ?? ''));
+	if ($deviceSerial !== '') {
+		$description .= ' RTL-SN ' . $deviceSerial;
+	}
+
+	return $description;
+}
+
+function build_output_display_name(array $config): string
+{
+	$name = trim((string)($config['streamName'] ?? ''));
+	$description = build_signal_description($config);
+	if ($name === '') {
+		return $description;
+	}
+
+	return $name . ' - ' . $description;
 }
 
 function build_stream_command(array $config): string
@@ -686,7 +969,8 @@ function build_stream_command(array $config): string
 	if ($streamUsername !== '' && $streamPassword !== '') {
 		$authPrefix = rawurlencode($streamUsername) . ':' . rawurlencode($streamPassword) . '@';
 	}
-	$description = (string)$config['frequency'] . ' BW ' . (string)$config['rtlBandwidth'] . ' ' . strtoupper((string)$config['mode']);
+	$description = build_signal_description($config);
+	$displayName = build_output_display_name($config);
 	$streamBitrate = max(16, min(320, (int)$config['streamBitrate']));
 	$vorbisQuality = max(0, min(10, (int)round(($streamBitrate - 32) / 32)));
 
@@ -710,7 +994,7 @@ function build_stream_command(array $config): string
 		'-content_type',
 		$contentType,
 		'-ice_name',
-		(string)$config['streamName'] . ' - ' . $description,
+		$displayName,
 		'-ice_description',
 		$description,
 		'-f',
@@ -731,6 +1015,158 @@ function build_stream_command(array $config): string
 	}
 
 	return command_from_parts($ffmpegCommand);
+}
+
+function recording_upload_hook_script_path(): string
+{
+	return __DIR__ . '/rtl_upload_hook.sh';
+}
+
+function embedded_recording_upload_hook_script(): string
+{
+	return <<<'SH'
+#!/bin/sh
+set -eu
+
+delete_after_upload=0
+upload_url=""
+upload_user=""
+upload_pass=""
+expect_user_token=0
+wav_file=""
+
+for arg in "$@"; do
+	if [ "$expect_user_token" -eq 1 ]; then
+		upload_user="${arg%%:*}"
+		upload_pass="${arg#*:}"
+		if [ "$upload_user" = "$arg" ]; then
+			upload_pass=""
+		fi
+		expect_user_token=0
+		continue
+	fi
+
+	case "$arg" in
+		--delete)
+			delete_after_upload=1
+			continue
+			;;
+		--user)
+			expect_user_token=1
+			continue
+			;;
+		http://*|https://*)
+			if [ -z "$upload_url" ]; then
+				upload_url="$arg"
+			fi
+			continue
+			;;
+	esac
+
+	if [ -z "$wav_file" ] && [ -f "$arg" ]; then
+		wav_file="$arg"
+	fi
+done
+
+if [ "$expect_user_token" -eq 1 ]; then
+	exit 64
+fi
+
+if [ -z "$wav_file" ]; then
+	for arg in "$@"; do
+		case "$arg" in
+			*.wav)
+				wav_file="$arg"
+				break
+				;;
+		esac
+	done
+fi
+
+if [ -z "$wav_file" ] || [ -z "$upload_url" ]; then
+	exit 64
+fi
+
+if [ -n "$upload_user" ] || [ -n "$upload_pass" ]; then
+	curl -fsS --retry 2 --retry-delay 1 --connect-timeout 15 --max-time 300 -X POST --user "$upload_user:$upload_pass" -F "recording=@$wav_file" "$upload_url"
+else
+	curl -fsS --retry 2 --retry-delay 1 --connect-timeout 15 --max-time 300 -X POST -F "recording=@$wav_file" "$upload_url"
+fi
+
+if [ "$delete_after_upload" -eq 1 ]; then
+	rm -f -- "$wav_file"
+fi
+SH;
+}
+
+function ensure_recording_upload_hook_script(string $scriptPath): bool
+{
+	$embeddedScript = embedded_recording_upload_hook_script() . "\n";
+	$currentScript = file_exists($scriptPath) ? file_get_contents($scriptPath) : false;
+
+	if (!is_string($currentScript) || $currentScript !== $embeddedScript) {
+		if (file_put_contents($scriptPath, $embeddedScript, LOCK_EX) === false) {
+			return false;
+		}
+	}
+
+	if (is_executable($scriptPath)) {
+		return true;
+	}
+
+	if (!@chmod($scriptPath, 0755) && !is_executable($scriptPath)) {
+		return false;
+	}
+
+	return true;
+}
+
+function build_recording_upload_hook_command(array $config, bool $deleteAfterUpload): string
+{
+	$uploadUrl = trim((string)($config['recordingUploadUrl'] ?? ''));
+	$uploadUsername = trim((string)($config['recordingUploadUsername'] ?? ''));
+	$uploadPassword = (string)($config['recordingUploadPassword'] ?? '');
+	$hookScript = recording_upload_hook_script_path();
+	$parts = array($hookScript, $uploadUrl);
+
+	if ($uploadUsername !== '' && $uploadPassword !== '') {
+		$parts[] = '--user';
+		$parts[] = $uploadUsername . ':' . $uploadPassword;
+	}
+
+	if ($deleteAfterUpload) {
+		$parts[] = '--delete';
+	}
+
+	return command_from_parts($parts);
+}
+
+function build_upload_after_record_command(array $config): string
+{
+	return build_recording_upload_hook_command($config, false);
+}
+
+function build_upload_and_delete_after_record_command(array $config): string
+{
+	return build_recording_upload_hook_command($config, true);
+}
+
+function build_after_record_hook_argument(array $config): string
+{
+	$action = strtolower(trim((string)($config['afterRecordAction'] ?? 'none')));
+	if ($action === 'command') {
+		return trim((string)($config['postCommandArg'] ?? ($config['postCommand'] ?? '')));
+	}
+
+	if ($action === 'upload') {
+		return build_upload_after_record_command($config);
+	}
+
+	if ($action === 'upload_delete') {
+		return build_upload_and_delete_after_record_command($config);
+	}
+
+	return '';
 }
 
 function build_pipeline_command(array $config): string
@@ -787,12 +1223,13 @@ function build_pipeline_command(array $config): string
 		'-o',
 		(string)$config['outputDir'],
 		'-n',
-		(string)$config['streamName'],
+		build_output_display_name($config),
 	);
 
-	if ($config['postCommand'] !== '') {
-		$recorderCommand[] = '-X';
-		$recorderCommand[] = (string)$config['postCommand'];
+	$afterRecordHook = build_after_record_hook_argument($config);
+	if ($afterRecordHook !== '') {
+		$recorderCommand[] = '-x';
+		$recorderCommand[] = $afterRecordHook;
 	}
 
 	$pipeline .= ' | ' . command_from_parts($recorderCommand);
@@ -822,6 +1259,10 @@ function stop_instance_by_pid(int $pid): void
 
 function start_instance(array $config, string $logDir): array
 {
+	$uploadModeEnabled =
+		(string)$config['outputMode'] === 'recorder'
+		&& in_array(strtolower((string)($config['afterRecordAction'] ?? 'none')), array('upload', 'upload_delete'), true);
+
 	if (!command_exists('python3')) {
 		return array('ok' => false, 'error' => 'python3 is required for silence padding but was not found in PATH. Install python3 to use this pipeline.');
 	}
@@ -832,6 +1273,17 @@ function start_instance(array $config, string $logDir): array
 		}
 	} elseif (!command_exists('rms-cast-recorder')) {
 		return array('ok' => false, 'error' => 'rms-cast-recorder is required for Recorder output mode but was not found in PATH.');
+	}
+
+	if ($uploadModeEnabled && !command_exists('curl')) {
+		return array('ok' => false, 'error' => 'curl is required for After Record Upload modes but was not found in PATH.');
+	}
+
+	if ($uploadModeEnabled) {
+		$hookScriptPath = recording_upload_hook_script_path();
+		if (!ensure_recording_upload_hook_script($hookScriptPath)) {
+			return array('ok' => false, 'error' => 'Failed to create upload hook script: ' . $hookScriptPath);
+		}
 	}
 
 	if (!is_dir($logDir) && !mkdir($logDir, 0775, true) && !is_dir($logDir)) {
@@ -946,9 +1398,11 @@ function discover_rtl_devices(): array
 
 		if (preg_match('/^([0-9]+):\s*(.+)$/', $trimmed, $matches)) {
 			$index = (string)((int)$matches[1]);
+			$label = trim((string)$matches[2]);
 			$devices[] = array(
 				'index' => $index,
-				'label' => sanitize_device_label(trim((string)$matches[2]), 'RTL-SDR Device ' . $index),
+				'label' => sanitize_device_label($label, 'RTL-SDR Device ' . $index),
+				'serial' => extract_device_serial($label),
 			);
 		}
 	}
@@ -958,6 +1412,7 @@ function discover_rtl_devices(): array
 			$devices[] = array(
 				'index' => (string)$index,
 				'label' => 'RTL-SDR Device ' . $index,
+				'serial' => '',
 			);
 		}
 	}
@@ -996,6 +1451,26 @@ if ($action !== '') {
 		$servers = normalize_streaming_servers($rawServers);
 		if (!save_streaming_servers($STREAMING_SERVERS_FILE, $servers)) {
 			send_json(array('ok' => false, 'error' => 'Failed to save streaming servers.'), 500);
+		}
+
+		send_json(array('ok' => true, 'servers' => $servers));
+	}
+
+	if ($action === 'recording_servers_get') {
+		$servers = load_recording_servers($RECORDING_SERVERS_FILE);
+		send_json(array('ok' => true, 'servers' => $servers));
+	}
+
+	if ($action === 'recording_servers_set') {
+		$payload = $_POST;
+		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
+			$payload = array_merge($payload, $jsonPayload);
+		}
+
+		$rawServers = isset($payload['servers']) && is_array($payload['servers']) ? $payload['servers'] : array();
+		$servers = normalize_recording_servers($rawServers);
+		if (!save_recording_servers($RECORDING_SERVERS_FILE, $servers)) {
+			send_json(array('ok' => false, 'error' => 'Failed to save recording servers.'), 500);
 		}
 
 		send_json(array('ok' => true, 'servers' => $servers));
@@ -1384,6 +1859,34 @@ if ($action !== '') {
 			</div>
 		</div>
 	</div>
+
+	<div id="recordingServerModal" class="modal hidden">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h3 id="recordingServerModalTitle">New Recording Server</h3>
+				<button type="button" class="modal-close" id="recordingServerModalClose">&times;</button>
+			</div>
+			<div class="modal-body">
+				<div class="form-row single">
+					<div><label>Server Name</label><input type="text" id="recordingServerModalName" placeholder="Library Ingest"></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Upload URL</label><input type="text" id="recordingServerModalUrl" placeholder="https://example/recordings/"></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Username (optional)</label><input type="text" id="recordingServerModalUsername" placeholder="api-user"></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Password (optional)</label><input type="password" id="recordingServerModalPassword" placeholder="api-password"></div>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="refresh-button" id="recordingServerModalCancel">Cancel</button>
+				<button type="button" class="refresh-button primary" id="recordingServerModalSave">Save Server</button>
+				<button type="button" class="refresh-button danger hidden" id="recordingServerModalDelete">Delete Server</button>
+			</div>
+		</div>
+	</div>
 </div>
 
 <script type="text/javascript">
@@ -1393,6 +1896,7 @@ var knownDetectedDevices = [];
 var deviceConfigsById = {};
 var settingsTemplates = {};
 var streamServersById = {};
+var recordingServersById = {};
 var openConfigPanelsByDevice = {};
 var openLogPanelsByDevice = {};
 var logContentByDevice = {};
@@ -1551,7 +2055,33 @@ function loadStreamServersFromServer()
 	});
 }
 
+function saveRecordingServers()
+{
+	return postAction('recording_servers_set', { servers: recordingServersById }).then(function (result) {
+		if (result && result.servers && typeof result.servers === 'object') {
+			recordingServersById = result.servers;
+		}
+		return recordingServersById;
+	});
+}
+
+function loadRecordingServersFromServer()
+{
+	return postAction('recording_servers_get', {}).then(function (result) {
+		if (!result || !result.servers || typeof result.servers !== 'object') {
+			recordingServersById = {};
+			return recordingServersById;
+		}
+		recordingServersById = result.servers;
+		return recordingServersById;
+	}).catch(function () {
+		recordingServersById = {};
+		return recordingServersById;
+	});
+}
+
 var currentEditingServerId = null;
+var currentEditingRecordingServerId = null;
 
 function openServerDialog(serverId)
 {
@@ -1647,6 +2177,104 @@ function deleteServer()
 			setStatus('Server deleted', false);
 		}).catch(function (error) {
 			setStatus(error.message || 'Failed to delete server', true);
+		});
+	}
+}
+
+function openRecordingServerDialog(serverId)
+{
+	currentEditingRecordingServerId = serverId;
+	var modal = document.getElementById('recordingServerModal');
+	var titleEl = document.getElementById('recordingServerModalTitle');
+	var nameEl = document.getElementById('recordingServerModalName');
+	var urlEl = document.getElementById('recordingServerModalUrl');
+	var usernameEl = document.getElementById('recordingServerModalUsername');
+	var passwordEl = document.getElementById('recordingServerModalPassword');
+	var deleteBtn = document.getElementById('recordingServerModalDelete');
+
+	if (serverId) {
+		var server = getRecordingServerById(serverId);
+		if (server) {
+			titleEl.textContent = 'Edit Recording Server';
+			nameEl.value = String(server.name || '');
+			urlEl.value = String(server.url || '');
+			usernameEl.value = String(server.username || '');
+			passwordEl.value = String(server.password || '');
+			deleteBtn.classList.remove('hidden');
+		} else {
+			return;
+		}
+	} else {
+		titleEl.textContent = 'New Recording Server';
+		nameEl.value = '';
+		urlEl.value = '';
+		usernameEl.value = '';
+		passwordEl.value = '';
+		deleteBtn.classList.add('hidden');
+	}
+
+	modal.classList.remove('hidden');
+	nameEl.focus();
+}
+
+function closeRecordingServerDialog()
+{
+	var modal = document.getElementById('recordingServerModal');
+	modal.classList.add('hidden');
+	currentEditingRecordingServerId = null;
+}
+
+function saveRecordingServer()
+{
+	var nameEl = document.getElementById('recordingServerModalName');
+	var urlEl = document.getElementById('recordingServerModalUrl');
+	var usernameEl = document.getElementById('recordingServerModalUsername');
+	var passwordEl = document.getElementById('recordingServerModalPassword');
+
+	var name = nameEl.value.trim();
+	var url = urlEl.value.trim();
+	var username = usernameEl.value.trim();
+	var password = passwordEl.value;
+
+	if (!name) {
+		setStatus('Recording server name is required', true);
+		return;
+	}
+	if (!url) {
+		setStatus('Upload URL is required', true);
+		return;
+	}
+
+	var serverId = currentEditingRecordingServerId || getNextRecordingServerId();
+	recordingServersById[serverId] = {
+		name: name,
+		url: url,
+		username: username,
+		password: password
+	};
+
+	saveRecordingServers().then(function () {
+		closeRecordingServerDialog();
+		renderDeviceList();
+		setStatus('Recording server saved', false);
+	}).catch(function (error) {
+		setStatus(error.message || 'Failed to save recording server', true);
+	});
+}
+
+function deleteRecordingServer()
+{
+	if (!currentEditingRecordingServerId) {
+		return;
+	}
+	if (confirm('Delete this recording server?')) {
+		delete recordingServersById[currentEditingRecordingServerId];
+		saveRecordingServers().then(function () {
+			closeRecordingServerDialog();
+			renderDeviceList();
+			setStatus('Recording server deleted', false);
+		}).catch(function (error) {
+			setStatus(error.message || 'Failed to delete recording server', true);
 		});
 	}
 }
@@ -1837,6 +2465,7 @@ function sanitizeTemplateConfig(config)
 {
 	var clean = Object.assign({}, config || {});
 	delete clean.device;
+	delete clean.deviceSerial;
 	delete clean.outputDir;
 	clean.streamFormat = String(clean.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	clean.streamMount = normalizeMountByFormat(clean.streamMount, clean.streamFormat);
@@ -1889,6 +2518,13 @@ function getDefaultConfig(deviceId)
 		streamUsername: '',
 		streamPassword: '',
 		streamName: '',
+		deviceSerial: '',
+		afterRecordAction: 'none',
+		recordingServerId: '',
+		recordingUploadUrl: '',
+		recordingUploadUsername: '',
+		recordingUploadPassword: '',
+		postCommandArg: '',
 		postCommand: '',
 		templateName: ''
 	};
@@ -1930,6 +2566,45 @@ function syncOutputModeFields(card)
 	}
 	for (var j = 0; j < recorderOnly.length; j++) {
 		recorderOnly[j].classList.toggle('hidden', isStream);
+	}
+	syncAfterRecordFields(card);
+}
+
+function syncAfterRecordFields(card)
+{
+	var outputModeSelect = card.querySelector('.field-output-mode');
+	var afterRecordSelect = card.querySelector('.field-after-record-action');
+	if (!outputModeSelect || !afterRecordSelect) {
+		return;
+	}
+
+	var isRecorder = String(outputModeSelect.value || 'recorder') === 'recorder';
+	var action = String(afterRecordSelect.value || 'none').toLowerCase();
+	if (action !== 'none' && action !== 'upload' && action !== 'upload_delete' && action !== 'command') {
+		action = 'none';
+		afterRecordSelect.value = 'none';
+	}
+
+	var showUpload = isRecorder && (action === 'upload' || action === 'upload_delete');
+	var showCommand = isRecorder && action === 'command';
+
+	var uploadRows = card.querySelectorAll('.output-after-record-upload');
+	var commandRows = card.querySelectorAll('.output-after-record-command');
+	for (var i = 0; i < uploadRows.length; i++) {
+		uploadRows[i].classList.toggle('hidden', !showUpload);
+	}
+	for (var j = 0; j < commandRows.length; j++) {
+		commandRows[j].classList.toggle('hidden', !showCommand);
+	}
+
+	if (showUpload) {
+		var recordingServerSelect = card.querySelector('.field-recording-server-id');
+		if (recordingServerSelect && String(recordingServerSelect.value || '').trim() === '') {
+			var firstRecordingServerId = getFirstRecordingServerId();
+			if (firstRecordingServerId !== '') {
+				recordingServerSelect.value = firstRecordingServerId;
+			}
+		}
 	}
 }
 
@@ -1991,12 +2666,6 @@ function getRxIndicator(deviceId, isRunning, config)
 	var lines = cache && Array.isArray(cache.lines) ? cache.lines : [];
 	for (var i = 0; i < lines.length; i++) {
 		var upper = String(lines[i] || '').toUpperCase();
-		if (upper.indexOf('[RX] ACTIVE') !== -1) {
-			return { label: 'Rx Active', className: 'rx-active' };
-		}
-		if (upper.indexOf('[RX] IDLE') !== -1) {
-			return { label: 'Rx Idle', className: 'rx-idle' };
-		}
 		if (upper.indexOf('[RECORD]') !== -1 || upper.indexOf('AUDIO DETECTED') !== -1) {
 			return { label: 'Rx Active', className: 'rx-active' };
 		}
@@ -2033,6 +2702,28 @@ function getConfigForDevice(deviceId)
 	merged.streamMount = normalizeMountByFormat(merged.streamMount, merged.streamFormat);
 	merged.streamUsername = String(merged.streamUsername || '');
 	merged.streamPassword = String(merged.streamPassword || '');
+	merged.deviceSerial = String(merged.deviceSerial || getDeviceSerialForId(deviceId));
+	merged.recordingServerId = String(merged.recordingServerId || '');
+	merged.recordingUploadUrl = String(merged.recordingUploadUrl || '');
+	merged.recordingUploadUsername = String(merged.recordingUploadUsername || '');
+	merged.recordingUploadPassword = String(merged.recordingUploadPassword || '');
+	merged.postCommandArg = String(merged.postCommandArg || merged.postCommand || '');
+	merged.postCommand = merged.postCommandArg;
+	merged.afterRecordAction = String(merged.afterRecordAction || '').toLowerCase();
+	if (merged.afterRecordAction !== 'upload' && merged.afterRecordAction !== 'upload_delete' && merged.afterRecordAction !== 'command' && merged.afterRecordAction !== 'none') {
+		merged.afterRecordAction = merged.postCommandArg !== '' ? 'command' : 'none';
+	}
+	if (merged.afterRecordAction === 'upload' || merged.afterRecordAction === 'upload_delete') {
+		if (merged.recordingServerId === '' || !getRecordingServerById(merged.recordingServerId)) {
+			merged.recordingServerId = getFirstRecordingServerId();
+		}
+		var selectedRecordingServer = getRecordingServerById(merged.recordingServerId);
+		if (selectedRecordingServer) {
+			merged.recordingUploadUrl = String(selectedRecordingServer.url || merged.recordingUploadUrl || '');
+			merged.recordingUploadUsername = String(selectedRecordingServer.username || merged.recordingUploadUsername || '');
+			merged.recordingUploadPassword = String(selectedRecordingServer.password || merged.recordingUploadPassword || '');
+		}
+	}
 	merged.templateName = String(merged.templateName || '');
 	return merged;
 }
@@ -2054,7 +2745,23 @@ function getDeviceDescriptor(deviceId)
 			return knownDetectedDevices[i];
 		}
 	}
-	return { index: String(deviceId), label: 'RTL-SDR Device ' + deviceId };
+	return { index: String(deviceId), label: 'RTL-SDR Device ' + deviceId, serial: '' };
+}
+
+function extractDeviceSerialFromLabel(label)
+{
+	var match = String(label || '').match(/(?:^|[,\s])SN:\s*([A-Za-z0-9._-]+)/i);
+	return match ? String(match[1]) : '';
+}
+
+function getDeviceSerialForId(deviceId)
+{
+	var descriptor = getDeviceDescriptor(deviceId);
+	if (descriptor && typeof descriptor.serial === 'string' && descriptor.serial.trim() !== '') {
+		return descriptor.serial.trim();
+	}
+
+	return extractDeviceSerialFromLabel(descriptor && descriptor.label ? descriptor.label : '');
 }
 
 function collectVisibleDevices()
@@ -2216,7 +2923,14 @@ function renderDeviceList()
 						'<div><label>Stream Name</label><input type="text" class="field-stream-name" value="' + escapeHtml(String(config.streamName || '')) + '" placeholder="Optional custom stream name"></div>' +
 					'</div>' +
 					'<div class="form-row single output-recorder-only">' +
-						'<div><label>Post-Record Command (-X)</label><input type="text" class="field-post-command" value="' + escapeHtml(String(config.postCommand || '')) + '" placeholder="Shell command to run after each recording"></div>' +
+						'<div><label>After Record</label><select class="field-after-record-action"><option value="none">None</option><option value="upload">Upload</option><option value="upload_delete">Upload and Delete</option><option value="command">Run Command</option></select></div>' +
+					'</div>' +
+					'<div class="form-row output-recorder-only output-after-record-upload hidden">' +
+						'<div style="flex: 1;"><label>Upload Server</label><select class="field-recording-server-id">' + buildRecordingServerOptions(String(config.recordingServerId || '')) + '</select></div>' +
+						'<div style="flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end;"><button type="button" class="refresh-button action-edit-recording-server" style="padding: 6px 12px;">Edit</button><button type="button" class="refresh-button action-new-recording-server" style="padding: 6px 12px;">New</button></div>' +
+					'</div>' +
+					'<div class="form-row single output-recorder-only output-after-record-command hidden">' +
+						'<div><label>Run Command Argument (-x)</label><input type="text" class="field-post-command-arg" value="' + escapeHtml(String(config.postCommandArg || '')) + '" placeholder="Argument passed directly to -x"></div>' +
 					'</div>' +
 				'</div>' +
 				'<div class="device-log-toggle"><button type="button" class="refresh-button action-toggle-log">' + logToggleLabel + '</button></div>' +
@@ -2267,6 +2981,46 @@ function getNextServerId()
 	}
 	return String(maxId + 1);
 }
+
+function buildRecordingServerOptions(selectedServerId)
+{
+	var html = '<option value="">-- Select Upload Server --</option>';
+	for (var id in recordingServersById) {
+		var server = recordingServersById[id];
+		var selected = id === selectedServerId ? ' selected' : '';
+		html += '<option value="' + escapeHtml(String(id)) + '"' + selected + '>' + escapeHtml(String(server.name || id)) + '</option>';
+	}
+	return html;
+}
+
+function getRecordingServerById(serverId)
+{
+	return recordingServersById[serverId] || null;
+}
+
+function getFirstRecordingServerId()
+{
+	for (var id in recordingServersById) {
+		if (Object.prototype.hasOwnProperty.call(recordingServersById, id)) {
+			return String(id);
+		}
+	}
+
+	return '';
+}
+
+function getNextRecordingServerId()
+{
+	var maxId = 0;
+	for (var id in recordingServersById) {
+		var numId = parseInt(id, 10);
+		if (!isNaN(numId) && numId > maxId) {
+			maxId = numId;
+		}
+	}
+	return String(maxId + 1);
+}
+
 function readCardConfig(card)
 {
 	var streamServerId = card.querySelector('.field-stream-server-id').value.trim();
@@ -2281,8 +3035,53 @@ function readCardConfig(card)
 			streamPassword = String(server.password || '');
 		}
 	}
+
+	var recordingServerField = card.querySelector('.field-recording-server-id');
+	var recordingServerId = recordingServerField ? recordingServerField.value.trim() : '';
+	var recordingUploadUrl = '';
+	var recordingUploadUsername = '';
+	var recordingUploadPassword = '';
+	if (recordingServerId) {
+		var recordingServer = getRecordingServerById(recordingServerId);
+		if (recordingServer) {
+			recordingUploadUrl = String(recordingServer.url || '');
+			recordingUploadUsername = String(recordingServer.username || '');
+			recordingUploadPassword = String(recordingServer.password || '');
+		}
+	}
+
+	var afterRecordSelect = card.querySelector('.field-after-record-action');
+	var afterRecordAction = afterRecordSelect ? afterRecordSelect.value.trim() : 'none';
+	var postCommandArgField = card.querySelector('.field-post-command-arg');
+	var postCommandArg = postCommandArgField ? postCommandArgField.value.trim() : '';
+	afterRecordAction = String(afterRecordAction || 'none').toLowerCase();
+	if (afterRecordAction !== 'none' && afterRecordAction !== 'upload' && afterRecordAction !== 'upload_delete' && afterRecordAction !== 'command') {
+		afterRecordAction = 'none';
+	}
+	if ((afterRecordAction === 'upload' || afterRecordAction === 'upload_delete') && (recordingServerId === '' || !getRecordingServerById(recordingServerId))) {
+		recordingServerId = getFirstRecordingServerId();
+	}
+	if ((afterRecordAction === 'upload' || afterRecordAction === 'upload_delete') && recordingServerId !== '') {
+		var selectedRecordingServer = getRecordingServerById(recordingServerId);
+		if (selectedRecordingServer) {
+			recordingUploadUrl = String(selectedRecordingServer.url || '');
+			recordingUploadUsername = String(selectedRecordingServer.username || '');
+			recordingUploadPassword = String(selectedRecordingServer.password || '');
+		}
+	}
+	if (afterRecordAction !== 'command') {
+		postCommandArg = '';
+	}
+	if (afterRecordAction !== 'upload' && afterRecordAction !== 'upload_delete') {
+		recordingServerId = '';
+		recordingUploadUrl = '';
+		recordingUploadUsername = '';
+		recordingUploadPassword = '';
+	}
+
 	return {
 		device: card.getAttribute('data-device-id'),
+		deviceSerial: getDeviceSerialForId(card.getAttribute('data-device-id')),
 		frequency: card.querySelector('.field-frequency').value.trim(),
 		mode: card.querySelector('.field-mode').value.trim(),
 		rtlBandwidth: card.querySelector('.field-rtl-bandwidth').value.trim(),
@@ -2299,7 +3098,13 @@ function readCardConfig(card)
 		streamPassword: streamPassword,
 		streamServerId: streamServerId,
 		streamName: card.querySelector('.field-stream-name').value.trim(),
-		postCommand: card.querySelector('.field-post-command').value.trim(),
+		afterRecordAction: afterRecordAction,
+		recordingServerId: recordingServerId,
+		recordingUploadUrl: recordingUploadUrl,
+		recordingUploadUsername: recordingUploadUsername,
+		recordingUploadPassword: recordingUploadPassword,
+		postCommandArg: postCommandArg,
+		postCommand: postCommandArg,
 		templateName: card.querySelector('.field-template-name').value.trim()
 	};
 }
@@ -2378,11 +3183,23 @@ function bindDeviceCard(card)
 	var bandwidthSelect = card.querySelector('.field-rtl-bandwidth');
 	var outputModeSelect = card.querySelector('.field-output-mode');
 	var streamFormatSelect = card.querySelector('.field-stream-format');
+	var afterRecordSelect = card.querySelector('.field-after-record-action');
+	var recordingServerSelect = card.querySelector('.field-recording-server-id');
+	var postCommandArgInput = card.querySelector('.field-post-command-arg');
 	var storedConfig = getConfigForDevice(deviceId);
 	modeSelect.value = storedConfig.mode || 'fm';
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
 	outputModeSelect.value = storedConfig.outputMode || 'recorder';
 	streamFormatSelect.value = storedConfig.streamFormat || 'mp3';
+	if (afterRecordSelect) {
+		afterRecordSelect.value = String(storedConfig.afterRecordAction || 'none');
+	}
+	if (recordingServerSelect) {
+		recordingServerSelect.value = String(storedConfig.recordingServerId || '');
+	}
+	if (postCommandArgInput) {
+		postCommandArgInput.value = String(storedConfig.postCommandArg || '');
+	}
 	syncMountWithStreamFormat(card, false);
 	syncOutputModeFields(card);
 	outputModeSelect.addEventListener('change', function () {
@@ -2391,6 +3208,11 @@ function bindDeviceCard(card)
 			stopListeningForDevice(deviceId, true);
 		}
 	});
+	if (afterRecordSelect) {
+		afterRecordSelect.addEventListener('change', function () {
+			syncAfterRecordFields(card);
+		});
+	}
 	streamFormatSelect.addEventListener('change', function () {
 		syncMountWithStreamFormat(card, true);
 	});
@@ -2454,6 +3276,26 @@ function bindDeviceCard(card)
 	if (newServerButton) {
 		newServerButton.addEventListener('click', function () {
 			openServerDialog(null);
+		});
+	}
+
+	var editRecordingServerButton = card.querySelector('.action-edit-recording-server');
+	if (editRecordingServerButton) {
+		editRecordingServerButton.addEventListener('click', function () {
+			var serverIdField = card.querySelector('.field-recording-server-id');
+			var serverId = serverIdField ? serverIdField.value.trim() : '';
+			if (serverId) {
+				openRecordingServerDialog(serverId);
+			} else {
+				setStatus('Please select an upload server first', true);
+			}
+		});
+	}
+
+	var newRecordingServerButton = card.querySelector('.action-new-recording-server');
+	if (newRecordingServerButton) {
+		newRecordingServerButton.addEventListener('click', function () {
+			openRecordingServerDialog(null);
 		});
 	}
 
@@ -2736,6 +3578,16 @@ function initializePage()
 		}
 	});
 
+	document.getElementById('recordingServerModalClose').addEventListener('click', closeRecordingServerDialog);
+	document.getElementById('recordingServerModalCancel').addEventListener('click', closeRecordingServerDialog);
+	document.getElementById('recordingServerModalSave').addEventListener('click', saveRecordingServer);
+	document.getElementById('recordingServerModalDelete').addEventListener('click', deleteRecordingServer);
+	document.getElementById('recordingServerModal').addEventListener('click', function (e) {
+		if (e.target === this) {
+			closeRecordingServerDialog();
+		}
+	});
+
 	var templatesExpanded = null;
 	try {
 		templatesExpanded = window.localStorage.getItem('rtlSdrTemplatesExpanded');
@@ -2748,7 +3600,7 @@ function initializePage()
 		refreshGlobalTemplateSelector();
 		refreshTemplateDeviceSelector();
 		renderDeviceList();
-		loadStreamServersFromServer().finally(function () {
+		Promise.all([loadStreamServersFromServer(), loadRecordingServersFromServer()]).finally(function () {
 			refreshGlobalTemplateSelector();
 			refreshTemplateDeviceSelector();
 			renderDeviceList();
