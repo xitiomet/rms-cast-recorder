@@ -893,6 +893,14 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		throw new RuntimeException('Gain must be numeric or "auto".');
 	}
 
+	$rawBiasT = $input['biasT'] ?? ($input['bias_t'] ?? '0');
+	if (is_bool($rawBiasT)) {
+		$biasTEnabled = $rawBiasT;
+	} else {
+		$normalizedBiasT = strtolower(trim((string)$rawBiasT));
+		$biasTEnabled = in_array($normalizedBiasT, array('1', 'true', 'yes', 'on', 'enabled'), true);
+	}
+
 	$threshold = trim((string)($input['threshold'] ?? '-40'));
 	$thresholdValue = -40.0;
 	if ($threshold !== '') {
@@ -1054,6 +1062,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'sampleRate' => $sampleRate,
 		'squelch' => (int)$squelch,
 		'gain' => $gain,
+		'biasT' => $biasTEnabled ? 1 : 0,
 		'threshold' => $thresholdValue,
 		'silence' => $silenceValue,
 		'outputMode' => $outputMode,
@@ -1415,6 +1424,10 @@ function build_pipeline_command(array $config): string
 	if ($config['gain'] !== '' && strtolower((string)$config['gain']) !== 'auto') {
 		$rtlCommand[] = '-g';
 		$rtlCommand[] = (string)$config['gain'];
+	}
+
+	if ((int)($config['biasT'] ?? 0) === 1) {
+		$rtlCommand[] = '-T';
 	}
 
 	$pipeline = command_from_parts($rtlCommand);
@@ -2374,7 +2387,7 @@ if ($action !== '') {
 			white-space: nowrap;
 		}
 		.device-title { margin: 0; font-size: 20px; }
-		.device-stream-name { grid-column: 1 / -1; margin: 0; color: var(--accent); font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		.device-stream-name { grid-column: 1 / -1; margin: 0; color: var(--accent); font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.device-subtitle { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.device-antenna-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; }
 		.device-antenna-label { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2472,6 +2485,10 @@ if ($action !== '') {
 			<select id="templateDeviceSelect" aria-label="Template target devices" multiple size="3"></select>
 			<button type="button" class="refresh-button primary" id="startTemplateSelectedButton">Start Template On Selected</button>
 			<button type="button" class="refresh-button" id="applyTemplateSelectedButton">Apply Template To Selected</button>
+			<button type="button" class="refresh-button" id="exportGlobalTemplateButton">Export Template JSON</button>
+			<button type="button" class="refresh-button" id="exportAllGlobalTemplatesButton">Export All Templates JSON</button>
+			<button type="button" class="refresh-button" id="importGlobalTemplateButton">Import Template(s) JSON</button>
+			<input type="file" id="importGlobalTemplateFileInput" accept="application/json,.json" style="display:none;">
 		</span>
 		<span class="toolbar-spacer"></span>
 		<button type="button" class="refresh-button" id="themeToggleButton">Toggle Theme</button>
@@ -3591,6 +3608,7 @@ function getDefaultConfig(deviceId)
 		rtlBandwidth: '12000',
 		squelch: '500',
 		gain: 'auto',
+		biasT: '0',
 		threshold: '-40',
 		silence: '2',
 		outputMode: 'recorder',
@@ -3623,6 +3641,12 @@ function normalizeClientSquelchValue(value)
 		return '1';
 	}
 	return raw;
+}
+
+function isBiasTEnabledValue(value)
+{
+	var normalized = String(value == null ? '0' : value).trim().toLowerCase();
+	return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on' || normalized === 'enabled';
 }
 
 function syncSquelchValidity(input)
@@ -3886,46 +3910,227 @@ function parseImportedTemplatePayload(rawValue)
 	};
 }
 
-function exportSelectedTemplateForCard(card)
+function parseImportedTemplatesPayload(rawValue)
 {
-	var templateSelect = card ? card.querySelector('.field-template-name') : null;
-	var templateName = templateSelect ? String(templateSelect.value || '').trim() : '';
-	if (templateName === '') {
-		setStatus('Select a template to export.', true);
-		return;
+	var importedByName = {};
+
+	var addImportedTemplate = function (rawTemplate, fallbackName) {
+		var candidate = rawTemplate;
+		var fallback = String(fallbackName || '').trim();
+		if (fallback !== '') {
+			if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+				candidate = { templateName: fallback, template: candidate };
+			} else {
+				candidate = Object.assign({}, candidate, { templateName: fallback });
+			}
+		}
+
+		var imported = parseImportedTemplatePayload(candidate);
+		importedByName[imported.name] = imported.template;
+	};
+
+	if (Array.isArray(rawValue)) {
+		for (var i = 0; i < rawValue.length; i++) {
+			addImportedTemplate(rawValue[i], '');
+		}
+	} else if (rawValue && typeof rawValue === 'object') {
+		if (Array.isArray(rawValue.templates)) {
+			for (var j = 0; j < rawValue.templates.length; j++) {
+				addImportedTemplate(rawValue.templates[j], '');
+			}
+		} else if (rawValue.templates && typeof rawValue.templates === 'object' && !Array.isArray(rawValue.templates)) {
+			for (var mapName in rawValue.templates) {
+				if (!Object.prototype.hasOwnProperty.call(rawValue.templates, mapName)) {
+					continue;
+				}
+				addImportedTemplate(rawValue.templates[mapName], mapName);
+			}
+		} else if (rawValue.template || typeof rawValue.templateName === 'string' || typeof rawValue.name === 'string') {
+			addImportedTemplate(rawValue, '');
+		} else {
+			var keys = Object.keys(rawValue);
+			var looksLikeTemplateMap = keys.length > 0;
+			for (var k = 0; k < keys.length; k++) {
+				var entry = rawValue[keys[k]];
+				if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+					looksLikeTemplateMap = false;
+					break;
+				}
+			}
+
+			if (looksLikeTemplateMap) {
+				for (var m = 0; m < keys.length; m++) {
+					addImportedTemplate(rawValue[keys[m]], keys[m]);
+				}
+			} else {
+				addImportedTemplate(rawValue, '');
+			}
+		}
+	} else {
+		throw new Error('Template JSON must be an object or array.');
 	}
 
-	if (!settingsTemplates[templateName] || typeof settingsTemplates[templateName] !== 'object') {
+	if (!Object.keys(importedByName).length) {
+		throw new Error('No templates found in JSON.');
+	}
+
+	return importedByName;
+}
+
+function exportTemplateByName(templateName)
+{
+	var name = String(templateName || '').trim();
+	if (name === '') {
+		setStatus('Select a template to export.', true);
+		return false;
+	}
+
+	if (!settingsTemplates[name] || typeof settingsTemplates[name] !== 'object') {
 		setStatus('Selected template was not found.', true);
-		return;
+		return false;
 	}
 
 	var payload = {
-		templateName: templateName,
-		template: sanitizeTemplateConfig(settingsTemplates[templateName]),
+		templateName: name,
+		template: sanitizeTemplateConfig(settingsTemplates[name]),
 	};
-	payload.template.templateName = templateName;
+	payload.template.templateName = name;
 
 	var jsonContent = '';
 	try {
 		jsonContent = JSON.stringify(payload, null, 2);
 	} catch (error) {
 		setStatus('Failed to serialize template for export.', true);
-		return;
+		return false;
 	}
 
 	var blob = new Blob([jsonContent + '\n'], { type: 'application/json;charset=utf-8' });
 	var objectUrl = window.URL.createObjectURL(blob);
 	var link = document.createElement('a');
 	link.href = objectUrl;
-	link.download = sanitizeTemplateFilenamePart(templateName) + '.json';
+	link.download = sanitizeTemplateFilenamePart(name) + '.json';
 	document.body.appendChild(link);
 	link.click();
 	document.body.removeChild(link);
 	window.setTimeout(function () {
 		window.URL.revokeObjectURL(objectUrl);
 	}, 0);
-	setStatus('Exported template "' + templateName + '".', false);
+	setStatus('Exported template "' + name + '".', false);
+	return true;
+}
+
+function exportAllTemplates()
+{
+	var names = Object.keys(settingsTemplates).sort();
+	if (!names.length) {
+		setStatus('No templates available to export.', true);
+		return false;
+	}
+
+	var payloadTemplates = {};
+	for (var i = 0; i < names.length; i++) {
+		var name = names[i];
+		if (!settingsTemplates[name] || typeof settingsTemplates[name] !== 'object') {
+			continue;
+		}
+		var normalized = sanitizeTemplateConfig(settingsTemplates[name]);
+		normalized.templateName = name;
+		payloadTemplates[name] = normalized;
+	}
+
+	var exportedNames = Object.keys(payloadTemplates);
+	if (!exportedNames.length) {
+		setStatus('No templates available to export.', true);
+		return false;
+	}
+
+	var jsonContent = '';
+	try {
+		jsonContent = JSON.stringify({ templates: payloadTemplates }, null, 2);
+	} catch (error) {
+		setStatus('Failed to serialize templates for export.', true);
+		return false;
+	}
+
+	var blob = new Blob([jsonContent + '\n'], { type: 'application/json;charset=utf-8' });
+	var objectUrl = window.URL.createObjectURL(blob);
+	var link = document.createElement('a');
+	link.href = objectUrl;
+	link.download = 'rtl_sdr_templates.json';
+	document.body.appendChild(link);
+	link.click();
+	document.body.removeChild(link);
+	window.setTimeout(function () {
+		window.URL.revokeObjectURL(objectUrl);
+	}, 0);
+
+	setStatus('Exported ' + exportedNames.length + ' template(s).', false);
+	return true;
+}
+
+function exportSelectedTemplateForCard(card)
+{
+	var templateSelect = card ? card.querySelector('.field-template-name') : null;
+	var templateName = templateSelect ? String(templateSelect.value || '').trim() : '';
+	exportTemplateByName(templateName);
+}
+
+function importTemplateFromFileForToolbar(file)
+{
+	readTextFile(file).then(function (contents) {
+		var parsed = null;
+		try {
+			parsed = JSON.parse(contents);
+		} catch (error) {
+			throw new Error('Template file is not valid JSON.');
+		}
+
+		var importedTemplates = parseImportedTemplatesPayload(parsed);
+		var names = Object.keys(importedTemplates).sort();
+		if (!names.length) {
+			throw new Error('No templates found in JSON.');
+		}
+
+		var overwriteCount = 0;
+		for (var i = 0; i < names.length; i++) {
+			if (settingsTemplates[names[i]] && typeof settingsTemplates[names[i]] === 'object') {
+				overwriteCount++;
+			}
+		}
+
+		if (overwriteCount > 0) {
+			var overwriteMessage = overwriteCount + ' template(s) already exist and will be overwritten. Continue?';
+			if (!window.confirm(overwriteMessage)) {
+				return null;
+			}
+		}
+
+		for (var j = 0; j < names.length; j++) {
+			var name = names[j];
+			settingsTemplates[name] = importedTemplates[name];
+		}
+
+		return saveTemplates().then(function () {
+			refreshGlobalTemplateSelector();
+			var globalTemplateSelect = document.getElementById('globalTemplateSelect');
+			if (globalTemplateSelect) {
+				globalTemplateSelect.value = names[0];
+			}
+			renderDeviceList();
+			var statusMessage = 'Imported ' + names.length + ' template(s).';
+			if (overwriteCount > 0) {
+				statusMessage += ' Overwrote ' + overwriteCount + ' existing template(s).';
+			}
+			setStatus(statusMessage, false);
+			return null;
+		});
+	}).catch(function (error) {
+		if (error && error.message) {
+			setStatus(error.message, true);
+			return;
+		}
+		setStatus('Failed to import template.', true);
+	});
 }
 
 function importTemplateFromFileForCard(card, file)
@@ -4198,6 +4403,7 @@ function renderDeviceList()
 		var antennaEditLabel = antennaDescription === '' ? 'Add' : 'Edit';
 		var antennaEditDisabledAttr = antennaSerial === '' ? ' disabled' : '';
 		var antennaEditTitleAttr = antennaSerial === '' ? ' title="Device serial unavailable"' : '';
+		var biasTEnabled = isBiasTEnabledValue(config.biasT);
 		if (String(config.streamName || '').trim() !== '') {
 			streamNameRow = '<div class="device-stream-name">' + escapeHtml(String(config.streamName || '')) + '</div>';
 		}
@@ -4232,9 +4438,11 @@ function renderDeviceList()
 				'</div>' +
 				'<div class="device-meta">' +
 					'<div class="meta-box"><span class="meta-label">Frequency</span><span class="meta-value">' + escapeHtml(config.frequency || '') + '</span></div>' +
-					'<div class="meta-box"><span class="meta-label">Mode / Bandwidth</span><span class="meta-value">' + escapeHtml((config.mode || 'fm').toUpperCase() + ' / BW ' + String(config.rtlBandwidth || '12000')) + '</span></div>' +
+					'<div class="meta-box"><span class="meta-label">Mode</span><span class="meta-value">' + escapeHtml((config.mode || 'fm').toUpperCase()) + '</span></div>' +
+					'<div class="meta-box"><span class="meta-label">Bandwidth</span><span class="meta-value">' + escapeHtml(String(config.rtlBandwidth || '12000') + ' Hz') + '</span></div>' +
+					'<div class="meta-box"><span class="meta-label">Bias-T</span><span class="meta-value">' + escapeHtml(biasTEnabled ? 'Enabled' : 'Disabled') + '</span></div>' +
 					'<div class="meta-box"><span class="meta-label">PID</span><span class="meta-value">' + escapeHtml(metaPid) + '</span></div>' +
-					'<div class="meta-box"><span class="meta-label">Squelch / Silence</span><span class="meta-value">' + escapeHtml(String(config.squelch || '500') + ' / ' + String(config.silence || '2') + 's') + '</span></div>' +
+					'<div class="meta-box"><span class="meta-label">Squelch</span><span class="meta-value">' + escapeHtml(String(config.squelch || '500')) + '</span></div>' +
 					'<div class="meta-box full"><span class="meta-label">Log File</span><span class="meta-value">' + escapeHtml(metaLog) + '</span></div>' +
 				'</div>' +
 				'<div class="' + configPanelClass + '">' +
@@ -4252,6 +4460,10 @@ function renderDeviceList()
 							'<option value="raw">RAW</option>' +
 						'</select></div>' +
 					'</div>' +
+					'<div class="form-row">' +
+						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
+						'<div><label>Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
+					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>RTL Bandwidth</label><select class="field-rtl-bandwidth">' +
 							'<option value="12000">12,000 Hz</option>' +
@@ -4262,14 +4474,13 @@ function renderDeviceList()
 						'</select></div>' +
 					'</div>' +
 					'<div class="form-row single">' +
+						'<div><label>Bias-T</label><select class="field-bias-t"><option value="0">Disabled</option><option value="1">Enabled</option></select></div>' +
+					'</div>' +
+					'<div class="form-row single">' +
 						'<div><label>Output Mode</label><select class="field-output-mode">' +
 							'<option value="recorder">Recorder</option>' +
 							'<option value="stream">Stream</option>' +
 						'</select></div>' +
-					'</div>' +
-					'<div class="form-row">' +
-						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
-						'<div><label>Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
 					'</div>' +
 					'<div class="form-row output-recorder-only">' +
 						'<div><label>Threshold (dB)</label><input type="text" class="field-threshold" value="' + escapeHtml(String(config.threshold || '-40')) + '" placeholder="-40 recommended start"></div>' +
@@ -4286,20 +4497,6 @@ function renderDeviceList()
 					'<div class="form-row output-stream-only hidden">' +
 						'<div><label>Mount Point</label><input type="text" class="field-stream-mount" value="' + escapeHtml(String(config.streamMount || '')) + '" placeholder="/rtl-sdr.' + escapeHtml(String(config.streamFormat || 'mp3')) + '"></div>' +
 					'</div>' +
-					'<div class="form-row single">' +
-						'<div><label>Template</label><select class="field-template-name">' + templateSelectOptions + '</select></div>' +
-					'</div>' +
-					'<div class="form-row template-button-row">' +
-						'<div><button type="button" class="refresh-button action-load-template">Load Template</button></div>' +
-						'<div><button type="button" class="refresh-button action-save-template">Save Template</button></div>' +
-					'</div>' +
-					'<div class="form-row template-button-row">' +
-						'<div><button type="button" class="refresh-button action-save-template-as">Save Template As...</button></div>' +
-						'<div><button type="button" class="refresh-button action-export-template">Export Template JSON</button></div>' +
-					'</div>' +
-					'<div class="form-row single">' +
-						'<div><button type="button" class="refresh-button action-import-template">Import Template JSON</button><input type="file" class="action-import-template-file" accept="application/json,.json" style="display:none;"></div>' +
-					'</div>' +
 					'<div class="form-row single output-recorder-only">' +
 						'<div><label>After Record</label><select class="field-after-record-action"><option value="none">None</option><option value="upload">Upload</option><option value="upload_delete">Upload and Delete (Locally)</option><option value="command">Run Command</option></select></div>' +
 					'</div>' +
@@ -4309,6 +4506,19 @@ function renderDeviceList()
 					'</div>' +
 					'<div class="form-row single output-recorder-only output-after-record-command hidden">' +
 						'<div><label>Run Command Argument (-x)</label><input type="text" class="field-post-command-arg" value="' + escapeHtml(String(config.postCommandArg || '')) + '" placeholder="Argument passed directly to -x"></div>' +
+					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>Template</label><select class="field-template-name">' + templateSelectOptions + '</select></div>' +
+					'</div>' +
+					'<div class="form-row template-button-row">' +
+						'<div><button type="button" class="refresh-button action-load-template">Load Template</button></div>' +
+						'<div><button type="button" class="refresh-button action-save-template">Save Template</button></div>' +
+					'</div>' +
+					'<div class="form-row single template-button-row">' +
+						'<div><button type="button" class="refresh-button primary action-save-template-start">Save Template + Start</button></div>' +
+					'</div>' +
+					'<div class="form-row single template-button-row">' +
+						'<div><button type="button" class="refresh-button action-save-template-as">Save Template As...</button></div>' +
 					'</div>' +
 				'</div>' +
 				'<div class="device-log-toggle"><button type="button" class="refresh-button action-toggle-log">' + logToggleLabel + '</button><button type="button" class="refresh-button action-download-log">Download Log</button></div>' +
@@ -4504,6 +4714,7 @@ function readCardConfig(card)
 		outputMode: card.querySelector('.field-output-mode').value.trim(),
 		squelch: normalizeClientSquelchValue(card.querySelector('.field-squelch').value),
 		gain: card.querySelector('.field-gain').value.trim(),
+		biasT: card.querySelector('.field-bias-t').value.trim(),
 		threshold: card.querySelector('.field-threshold').value.trim(),
 		silence: card.querySelector('.field-silence').value.trim(),
 		streamFormat: card.querySelector('.field-stream-format').value.trim(),
@@ -4692,6 +4903,7 @@ function bindDeviceCard(card)
 	var deviceId = String(card.getAttribute('data-device-id') || '');
 	var modeSelect = card.querySelector('.field-mode');
 	var bandwidthSelect = card.querySelector('.field-rtl-bandwidth');
+	var biasTSelect = card.querySelector('.field-bias-t');
 	var outputModeSelect = card.querySelector('.field-output-mode');
 	var streamFormatSelect = card.querySelector('.field-stream-format');
 	var afterRecordSelect = card.querySelector('.field-after-record-action');
@@ -4700,6 +4912,9 @@ function bindDeviceCard(card)
 	var storedConfig = getConfigForDevice(deviceId);
 	modeSelect.value = storedConfig.mode || 'fm';
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
+	if (biasTSelect) {
+		biasTSelect.value = isBiasTEnabledValue(storedConfig.biasT) ? '1' : '0';
+	}
 	outputModeSelect.value = storedConfig.outputMode || 'recorder';
 	streamFormatSelect.value = storedConfig.streamFormat || 'mp3';
 	if (afterRecordSelect) {
@@ -4737,9 +4952,6 @@ function bindDeviceCard(card)
 	var inputs = card.querySelectorAll('input, select');
 	for (var i = 0; i < inputs.length; i++) {
 		inputs[i].addEventListener('input', function () {
-			if (this.classList.contains('action-import-template-file')) {
-				return;
-			}
 			if (this.classList.contains('field-squelch')) {
 				syncSquelchValidity(this);
 			}
@@ -4747,9 +4959,6 @@ function bindDeviceCard(card)
 		});
 
 		inputs[i].addEventListener('change', function () {
-			if (this.classList.contains('action-import-template-file')) {
-				return;
-			}
 			if (this.classList.contains('field-squelch')) {
 				this.value = normalizeClientSquelchValue(this.value);
 				syncSquelchValidity(this);
@@ -4851,36 +5060,59 @@ function bindDeviceCard(card)
 		});
 	}
 
+	var saveTemplateFromCard = function (startAfterSave) {
+		var currentConfig = readCardConfig(card);
+		var name = String(currentConfig.templateName || '').trim();
+		var templateWasSelected = name !== '';
+		if (name === '') {
+			name = String(currentConfig.streamName || '').trim();
+			if (name === '') {
+				setStatus('No template selected. Enter Stream Name to create one.', true);
+				return;
+			}
+		}
+
+		var wasExistingTemplate = !!settingsTemplates[name];
+		var config = sanitizeTemplateConfig(currentConfig);
+		config.templateName = name;
+		settingsTemplates[name] = config;
+		deviceConfigsById[String(deviceId)] = Object.assign({}, getConfigForDevice(deviceId), config, { templateName: name });
+		saveDeviceConfigs(String(deviceId));
+		saveTemplates().then(function () {
+			refreshGlobalTemplateSelector();
+			var templateSelect = card.querySelector('.field-template-name');
+			if (templateSelect) {
+				templateSelect.value = name;
+			}
+
+			if (startAfterSave) {
+				setStatus('Template "' + name + '" saved. Starting device ' + deviceId + '...', false);
+				startOrRetuneCard(card);
+				return;
+			}
+
+			renderDeviceList();
+			if (!templateWasSelected) {
+				setStatus('Template "' + name + '" created and selected.', false);
+				return;
+			}
+			setStatus('Template "' + name + '" ' + (wasExistingTemplate ? 'overwritten.' : 'saved.'), false);
+		}).catch(function (error) {
+			setStatus(error.message || ('Failed to save template "' + name + '".'), true);
+		});
+	};
+
 	var saveTemplateButton = card.querySelector('.action-save-template');
 	if (saveTemplateButton) {
 		saveTemplateButton.addEventListener('click', function () {
-			var currentConfig = readCardConfig(card);
-			var name = String(currentConfig.templateName || '').trim();
-			var templateWasSelected = name !== '';
-			if (name === '') {
-				name = String(currentConfig.streamName || '').trim();
-				if (name === '') {
-					setStatus('No template selected. Enter Stream Name to create one.', true);
-					return;
-				}
-			}
-			var wasExistingTemplate = !!settingsTemplates[name];
-			var config = sanitizeTemplateConfig(currentConfig);
-			config.templateName = name;
-			settingsTemplates[name] = config;
-			deviceConfigsById[String(deviceId)] = Object.assign({}, getConfigForDevice(deviceId), config, { templateName: name });
-			saveDeviceConfigs(String(deviceId));
-			saveTemplates().then(function () {
-				refreshGlobalTemplateSelector();
-				renderDeviceList();
-				if (!templateWasSelected) {
-					setStatus('Template "' + name + '" created and selected.', false);
-					return;
-				}
-				setStatus('Template "' + name + '" ' + (wasExistingTemplate ? 'overwritten.' : 'saved.'), false);
-			}).catch(function (error) {
-				setStatus(error.message || ('Failed to save template "' + name + '".'), true);
-			});
+			saveTemplateFromCard(false);
+		});
+	}
+
+	var saveTemplateStartButton = card.querySelector('.action-save-template-start');
+	if (saveTemplateStartButton) {
+		saveTemplateStartButton.addEventListener('click', function () {
+			saveTemplateFromCard(true);
 		});
 	}
 
@@ -4910,31 +5142,6 @@ function bindDeviceCard(card)
 			}).catch(function (error) {
 				setStatus(error.message || ('Failed to save template "' + name + '".'), true);
 			});
-		});
-	}
-
-	var exportTemplateButton = card.querySelector('.action-export-template');
-	if (exportTemplateButton) {
-		exportTemplateButton.addEventListener('click', function () {
-			exportSelectedTemplateForCard(card);
-		});
-	}
-
-	var importTemplateButton = card.querySelector('.action-import-template');
-	var importTemplateFileInput = card.querySelector('.action-import-template-file');
-	if (importTemplateButton && importTemplateFileInput) {
-		importTemplateButton.addEventListener('click', function () {
-			importTemplateFileInput.click();
-		});
-
-		importTemplateFileInput.addEventListener('change', function () {
-			var file = importTemplateFileInput.files && importTemplateFileInput.files[0] ? importTemplateFileInput.files[0] : null;
-			if (!file) {
-				return;
-			}
-
-			importTemplateFromFileForCard(card, file);
-			importTemplateFileInput.value = '';
 		});
 	}
 
@@ -5428,6 +5635,34 @@ function initializePage()
 		}
 		setStatus('Applied template "' + templateName + '" to ' + appliedCount + ' device(s).', false);
 	});
+
+	document.getElementById('exportGlobalTemplateButton').addEventListener('click', function () {
+		var templateSelect = document.getElementById('globalTemplateSelect');
+		var templateName = templateSelect ? String(templateSelect.value || '') : '';
+		exportTemplateByName(templateName);
+	});
+
+	document.getElementById('exportAllGlobalTemplatesButton').addEventListener('click', function () {
+		exportAllTemplates();
+	});
+
+	var importGlobalTemplateButton = document.getElementById('importGlobalTemplateButton');
+	var importGlobalTemplateFileInput = document.getElementById('importGlobalTemplateFileInput');
+	if (importGlobalTemplateButton && importGlobalTemplateFileInput) {
+		importGlobalTemplateButton.addEventListener('click', function () {
+			importGlobalTemplateFileInput.click();
+		});
+
+		importGlobalTemplateFileInput.addEventListener('change', function () {
+			var file = importGlobalTemplateFileInput.files && importGlobalTemplateFileInput.files[0] ? importGlobalTemplateFileInput.files[0] : null;
+			if (!file) {
+				return;
+			}
+
+			importTemplateFromFileForToolbar(file);
+			importGlobalTemplateFileInput.value = '';
+		});
+	}
 
 	document.getElementById('serverModalClose').addEventListener('click', closeServerDialog);
 	document.getElementById('serverModalCancel').addEventListener('click', closeServerDialog);
