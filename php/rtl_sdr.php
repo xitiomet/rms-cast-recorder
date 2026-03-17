@@ -1252,6 +1252,7 @@ if ($action !== '') {
 			white-space: nowrap;
 		}
 		.device-title { margin: 0; font-size: 20px; }
+		.device-stream-name { grid-column: 1 / -1; margin: 0; color: var(--accent); font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.device-subtitle { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.state-pill {
 			display: inline-flex;
@@ -2109,12 +2110,16 @@ function renderDeviceList()
 		var logMeta = logCache.logFile ? logCache.logFile : 'No log loaded';
 		var templateSelectOptions = templateOptionsMarkup(String(config.templateName || ''));
 		var isListening = !!streamPlayersByDevice[deviceId];
-		var listenButtonLabel = isListening ? 'Stop Listening' : 'Listen';
+		var listenButtonLabel = isListening ? 'Mute' : 'Listen';
 		var listenButtonClass = isListening ? 'refresh-button danger action-listen-stream' : 'refresh-button action-listen-stream';
 		var listenButtonClassPills = isListening ? 'danger action-listen-stream' : 'action-listen-stream';
 		var isStreamMode = String(config.outputMode || 'recorder') === 'stream';
 		var streamActionButtonsHtml = '';
 		var streamActionButtonsForPills = '';
+		var streamNameRow = '';
+		if (String(config.streamName || '').trim() !== '') {
+			streamNameRow = '<div class="device-stream-name">' + escapeHtml(String(config.streamName || '')) + '</div>';
+		}
 		if (isStreamMode) {
 			streamActionButtonsHtml =
 				'<button type="button" class="refresh-button action-copy-stream">Copy Stream URL</button>' +
@@ -2133,6 +2138,7 @@ function renderDeviceList()
 						'<div class="state-pill ' + stateClass + '">' + stateLabel + '</div>' +
 						(isStreamMode ? streamActionButtonsForPills : '<div class="state-pill ' + rxIndicator.className + '">' + rxIndicator.label + '</div>') +
 					'</div>' +
+					streamNameRow +
 					'<div class="device-subtitle">' + escapeHtml(String(device.label || ('RTL-SDR Device ' + deviceId))) + '</div>' +
 				'</div>' +
 				'<div class="device-actions">' +
