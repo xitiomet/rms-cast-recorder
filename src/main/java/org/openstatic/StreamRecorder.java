@@ -300,7 +300,7 @@ public class StreamRecorder {
             try {
                 log("CONNECT", ANSI_BLUE, "Connecting to " + streamUrl);
                 HttpURLConnection conn = (HttpURLConnection) streamUrl.openConnection();
-                conn.setRequestProperty("User-Agent", "rms-cast-recorder/1.0");
+                conn.setRequestProperty("User-Agent", "radio-pipe/1.0");
                 conn.setConnectTimeout(10000);
                 conn.setReadTimeout(15000);
                 conn.connect();

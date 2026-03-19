@@ -1152,7 +1152,7 @@ function discover_managed_pipeline_groups(): array
 		}
 
 		$containsRtlFm = stripos($args, 'rtl_fm') !== false;
-		$containsRecorder = stripos($args, 'rms-cast-recorder') !== false;
+		$containsRecorder = stripos($args, 'radio-pipe') !== false;
 		$containsFfmpeg = stripos($args, 'ffmpeg') !== false;
 		$containsShellPipeline = stripos($args, 'sh -c rtl_fm') !== false;
 		if (!$containsRtlFm && !$containsRecorder && !$containsFfmpeg && !$containsShellPipeline) {
@@ -3005,19 +3005,19 @@ function normalize_config(array $input, string $defaultOutputDir): array
 	);
 }
 
-function rms_cast_recorder_supports_stdout_padding(): bool
+function radio_pipe_supports_stdout_padding(): bool
 {
 	static $supports = null;
 	if ($supports !== null) {
 		return $supports;
 	}
 
-	if (!command_exists('rms-cast-recorder')) {
+	if (!command_exists('radio-pipe')) {
 		$supports = false;
 		return $supports;
 	}
 
-	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
 	if (!is_string($helpOutput) || trim($helpOutput) === '') {
 		$supports = false;
 		return $supports;
@@ -3031,19 +3031,19 @@ function rms_cast_recorder_supports_stdout_padding(): bool
 	return $supports;
 }
 
-function rms_cast_recorder_supports_stdout_pad_delay(): bool
+function radio_pipe_supports_stdout_pad_delay(): bool
 {
 	static $supports = null;
 	if ($supports !== null) {
 		return $supports;
 	}
 
-	if (!command_exists('rms-cast-recorder')) {
+	if (!command_exists('radio-pipe')) {
 		$supports = false;
 		return $supports;
 	}
 
-	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
 	if (!is_string($helpOutput) || trim($helpOutput) === '') {
 		$supports = false;
 		return $supports;
@@ -3053,19 +3053,19 @@ function rms_cast_recorder_supports_stdout_pad_delay(): bool
 	return $supports;
 }
 
-function rms_cast_recorder_supports_input_dejitter(): bool
+function radio_pipe_supports_input_dejitter(): bool
 {
 	static $supports = null;
 	if ($supports !== null) {
 		return $supports;
 	}
 
-	if (!command_exists('rms-cast-recorder')) {
+	if (!command_exists('radio-pipe')) {
 		$supports = false;
 		return $supports;
 	}
 
-	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
 	if (!is_string($helpOutput) || trim($helpOutput) === '') {
 		$supports = false;
 		return $supports;
@@ -3087,19 +3087,19 @@ function get_rms_input_dejitter_ms(): int
 	return max(0, (int)$RMS_INPUT_DEJITTER_MS);
 }
 
-function rms_cast_recorder_supports_ctcss(): bool
+function radio_pipe_supports_ctcss(): bool
 {
 	static $supports = null;
 	if ($supports !== null) {
 		return $supports;
 	}
 
-	if (!command_exists('rms-cast-recorder')) {
+	if (!command_exists('radio-pipe')) {
 		$supports = false;
 		return $supports;
 	}
 
-	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
 	if (!is_string($helpOutput) || trim($helpOutput) === '') {
 		$supports = false;
 		return $supports;
@@ -3112,11 +3112,11 @@ function rms_cast_recorder_supports_ctcss(): bool
 function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0): string
 {
 	$conditionerCommand = array(
-		'rms-cast-recorder',
+		'radio-pipe',
 		'--stdin',
 	);
 
-	if ($inputDejitterMs > 0 && rms_cast_recorder_supports_input_dejitter()) {
+	if ($inputDejitterMs > 0 && radio_pipe_supports_input_dejitter()) {
 		$conditionerCommand[] = '--input-dejitter';
 		$conditionerCommand[] = (string)$inputDejitterMs;
 	}
@@ -3161,7 +3161,7 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		'--stdout-pad'
 	);
 
-	if ($stdoutPadDelayMs > 0 && rms_cast_recorder_supports_stdout_pad_delay()) {
+	if ($stdoutPadDelayMs > 0 && radio_pipe_supports_stdout_pad_delay()) {
 		$conditionerCommand[] = '--stdout-pad-delay';
 		$conditionerCommand[] = (string)$stdoutPadDelayMs;
 	}
@@ -3187,13 +3187,13 @@ function build_stream_input_conditioner_command(array $config): string
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
 {
 	$recorderCommand = array(
-		'rms-cast-recorder',
+		'radio-pipe',
 		'--stdin',
 	);
 
 	if ($enableStdout) {
 		$inputDejitterMs = get_rms_input_dejitter_ms();
-		if ($inputDejitterMs > 0 && rms_cast_recorder_supports_input_dejitter()) {
+		if ($inputDejitterMs > 0 && radio_pipe_supports_input_dejitter()) {
 			$recorderCommand[] = '--input-dejitter';
 			$recorderCommand[] = (string)$inputDejitterMs;
 		}
@@ -3258,7 +3258,7 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 			'--stdout-pad'
 		);
 
-		if ($stdoutPadDelayMs > 0 && rms_cast_recorder_supports_stdout_pad_delay()) {
+		if ($stdoutPadDelayMs > 0 && radio_pipe_supports_stdout_pad_delay()) {
 			$recorderCommand[] = '--stdout-pad-delay';
 			$recorderCommand[] = (string)$stdoutPadDelayMs;
 		}
@@ -3729,7 +3729,7 @@ function stop_instance_by_pid(int $pid, int $processGroupId = 0): void
 
 function start_instance(array $config, string $logDir, ?array $attemptDelaysUs = null): array
 {
-	$recorderAvailable = command_exists('rms-cast-recorder');
+	$recorderAvailable = command_exists('radio-pipe');
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
 	$ctcssTone = trim((string)($config['ctcss'] ?? ''));
 	$bindingResult = refresh_runtime_device_binding_for_start($config);
@@ -3742,9 +3742,9 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 	$uploadModeEnabled =
 		$recordEnabled
 		&& in_array(strtolower((string)($config['afterRecordAction'] ?? 'none')), array('upload', 'upload_delete'), true);
-	$recorderSupportsStdoutPad = $recorderAvailable && rms_cast_recorder_supports_stdout_padding();
+	$recorderSupportsStdoutPad = $recorderAvailable && radio_pipe_supports_stdout_padding();
 	$rmsInputDejitterMs = $streamEnabled ? get_rms_input_dejitter_ms() : 0;
-	$recorderSupportsInputDejitter = $recorderAvailable && rms_cast_recorder_supports_input_dejitter();
+	$recorderSupportsInputDejitter = $recorderAvailable && radio_pipe_supports_input_dejitter();
 
 	if ($streamEnabled) {
 		if (!command_exists('ffmpeg')) {
@@ -3752,24 +3752,24 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		}
 
 		if (!$recorderAvailable) {
-			return array('ok' => false, 'error' => 'rms-cast-recorder is required for Stream output conditioning (--stdout-pad) but was not found in PATH.');
+			return array('ok' => false, 'error' => 'radio-pipe is required for Stream output conditioning (--stdout-pad) but was not found in PATH.');
 		}
 	}
 
 	if ($recordEnabled && !$recorderAvailable) {
-		return array('ok' => false, 'error' => 'rms-cast-recorder is required when Record output is enabled but was not found in PATH.');
+		return array('ok' => false, 'error' => 'radio-pipe is required when Record output is enabled but was not found in PATH.');
 	}
 
-	if ($ctcssTone !== '' && !rms_cast_recorder_supports_ctcss()) {
-		return array('ok' => false, 'error' => 'CTCSS is configured but this rms-cast-recorder build does not support --ctcss.');
+	if ($ctcssTone !== '' && !radio_pipe_supports_ctcss()) {
+		return array('ok' => false, 'error' => 'CTCSS is configured but this radio-pipe build does not support --ctcss.');
 	}
 
 	if ($streamEnabled && !$recorderSupportsStdoutPad) {
-		return array('ok' => false, 'error' => 'Stream output requires rms-cast-recorder support for --stdout-raw and --stdout-pad. Upgrade rms-cast-recorder and retry.');
+		return array('ok' => false, 'error' => 'Stream output requires radio-pipe support for --stdout-raw and --stdout-pad. Upgrade radio-pipe and retry.');
 	}
 
 	if ($streamEnabled && $rmsInputDejitterMs > 0 && !$recorderSupportsInputDejitter) {
-		return array('ok' => false, 'error' => 'Stream output is configured with RMS_INPUT_DEJITTER_MS, but this rms-cast-recorder build does not support --input-dejitter. Upgrade rms-cast-recorder or set RMS_INPUT_DEJITTER_MS to 0.');
+		return array('ok' => false, 'error' => 'Stream output is configured with RMS_INPUT_DEJITTER_MS, but this radio-pipe build does not support --input-dejitter. Upgrade radio-pipe or set RMS_INPUT_DEJITTER_MS to 0.');
 	}
 
 	if ($uploadModeEnabled && !command_exists('curl')) {
@@ -7467,7 +7467,7 @@ function buildPipelineStagePreviewLines(config)
 	var dcsCode = normalizeClientDcsCode(source.dcs);
 	var ctcssTone = normalizeClientCtcssTone(source.ctcss);
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
-		var recorderBothLine = 'rms-cast-recorder --stdin';
+		var recorderBothLine = 'radio-pipe --stdin';
 		if (rmsInputDejitterMs > 0) {
 			recorderBothLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
 		}
@@ -7483,7 +7483,7 @@ function buildPipelineStagePreviewLines(config)
 		}
 		lines.push(recorderBothLine);
 	} else if (outputSelection.streamEnabled) {
-		var conditionerLine = 'rms-cast-recorder --stdin';
+		var conditionerLine = 'radio-pipe --stdin';
 		if (rmsInputDejitterMs > 0) {
 			conditionerLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
 		}
@@ -7497,7 +7497,7 @@ function buildPipelineStagePreviewLines(config)
 		}
 		lines.push(conditionerLine);
 	} else {
-		var recorderLine = 'rms-cast-recorder --stdin';
+		var recorderLine = 'radio-pipe --stdin';
 		recorderLine += ' -t ' + String(source.threshold || '-40');
 		recorderLine += ' -s ' + String(source.silence || '2');
 		if (dcsCode !== '') {

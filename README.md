@@ -1,8 +1,8 @@
-## RMSCastRecorder
+## RadioPipe
 
-RMSCastRecorder is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, so you capture actual transmissions instead of long stretches of silence. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
+RadioPipe is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, so you capture actual transmissions instead of long stretches of silence. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
 
-Built for unattended logging, RMSCastRecorder stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique.
+Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique.
 
 ## Feature Overview
 
@@ -20,10 +20,10 @@ A recording path will look like:
 
 `./recordings/2026-03-12/2026-03-12_024630_RadPi.wav`
 
-Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.org/projects/rms-cast-recorder/#downloads) (scroll to the bottom)
+Regular builds can be found at [radio-pipe downloads](https://openstatic.org/projects/radio-pipe/#downloads) (scroll to the bottom)
 
 ### PHP Recordings Browser
-![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
+![](https://openstatic.org/projects/radio-pipe/recordings_php.png)
 
 `php/recordings.php` provides a web interface for browsing and reviewing recordings.
 You only need a PHP-capable web server with these extensions:
@@ -44,15 +44,15 @@ $PAGE_TITLE = 'Icecast Stream Recordings';
 
 If you are on Windows and want a quick setup, there is an experimental stand-alone package that sets up everything in `%APPDATA%`.
 
-[recordings-browser Installer](https://openstatic.org/projects/rms-cast-recorder/recordings-browser.exe)
+[recordings-browser Installer](https://openstatic.org/projects/radio-pipe/recordings-browser.exe)
 You will likely see security warnings because it is a 7zip self-extracting archive.
 
 There is no uninstall, but you can right-click the shortcut, open its location, and delete the folder.
 
 ### PHP RTL-SDR Manager
-![](https://openstatic.org/projects/rms-cast-recorder/rtl_manage.png)
+![](https://openstatic.org/projects/radio-pipe/rtl_manage.png)
 
-`php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `rms-cast-recorder` (recording), `ffmpeg` (live Icecast streaming), or both.
+`php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `radio-pipe` (recording), `ffmpeg` (live Icecast streaming), or both.
 
 It is designed for unattended radio capture setups where you need to tune, monitor, and recover multiple RTL-SDR pipelines from one page.
 
@@ -69,7 +69,7 @@ It is designed for unattended radio capture setups where you need to tune, monit
 #### Requirements for `rtl_sdr.php`
 
 * `rtl_fm` (`rtl-sdr` package)
-* `rms-cast-recorder` in `PATH` (required for recording and stream conditioning)
+* `radio-pipe` in `PATH` (required for recording and stream conditioning)
 * `ffmpeg` in `PATH` (required when stream output is enabled)
 * `curl` in `PATH` (required only for After Record upload modes)
 
@@ -115,14 +115,14 @@ The watchdog posts `action=list&source=watchdog` on an interval to process queue
 
 ## Usage
 Basic usage example:
-![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
+![](https://openstatic.org/projects/radio-pipe/rms_screenshot.png)
 
 You can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
 Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
 
 URL example:
 ```bash
-$ ./rms-cast-recorder \
+$ ./radio-pipe \
       -u http://example.com:8000/stream.mp3 \
   -o ./recordings \
   -x /usr/local/bin/on-clip-written.sh \
@@ -133,19 +133,19 @@ $ ./rms-cast-recorder \
 stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t wav - \
-  | ./rms-cast-recorder --stdin -o ./recordings
+  | ./radio-pipe --stdin -o ./recordings
 ```
 
 stdin example (`sox`):
 ```bash
 $ sox /path/to/input.mp3 -t wav - \
-  | ./rms-cast-recorder --stdin -o ./recordings
+  | ./radio-pipe --stdin -o ./recordings
 ```
 
 raw PCM stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
-  | ./rms-cast-recorder --stdin --stdin-raw \
+  | ./radio-pipe --stdin --stdin-raw \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     -o ./recordings
 ```
@@ -153,7 +153,7 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
 raw PCM stdout example (gate audio for another program):
 ```bash
 $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
-  | ./rms-cast-recorder --stdin --stdin-raw \
+  | ./radio-pipe --stdin --stdin-raw \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     --dcs 023 \
     --stdout --stdout-raw --stdout-pad \
@@ -171,7 +171,7 @@ Converts a single WAV file to MP3 and removes the original on success. Designed 
 Requires: `exiftool`, `lame` (`sudo apt install -y lame`)
 
 ```bash
-$ ./rms-cast-recorder -u http://example.com:8000/stream.mp3 \
+$ ./radio-pipe -u http://example.com:8000/stream.mp3 \
       -o ./recordings \
       -x ./scripts/x-convert-mp3.sh
 ```
@@ -183,7 +183,7 @@ Same as `x-convert-mp3.sh` but produces an Ogg Vorbis file instead of MP3.
 Requires: `exiftool`, `oggenc` (`sudo apt install -y vorbis-tools`)
 
 ```bash
-$ ./rms-cast-recorder -u http://example.com:8000/stream.mp3 \
+$ ./radio-pipe -u http://example.com:8000/stream.mp3 \
       -o ./recordings \
       -x ./scripts/x-convert-ogg.sh
 ```
@@ -210,14 +210,14 @@ $ ./scripts/bulk-compress-to-ogg.sh ./recordings
 
 ### `rtl-fm-record.sh` — RTL-SDR capture helper
 
-Runs `rtl_fm` and pipes raw PCM into `rms-cast-recorder` using `--stdin --stdin-raw`.
+Runs `rtl_fm` and pipes raw PCM into `radio-pipe` using `--stdin --stdin-raw`.
 The script sets stream names as `RTLSDR - (<frequency>)`, so each tuned frequency
 is clearly labeled in output filenames and metadata.
 
 Requires:
 
 * `rtl_fm` (from `rtl-sdr`) (`sudo apt install -y rtl-sdr`)
-* `rms-cast-recorder` binary in `PATH` or pass `-e <path>`
+* `radio-pipe` binary in `PATH` or pass `-e <path>`
 
 Common examples:
 
@@ -245,7 +245,7 @@ Script options:
 * `-C,--ctcss <hz>` – optional CTCSS gate tone in Hz (example `100.0`)
 * `-R,--sample-rate <hz>` – sample rate for both rtl_fm and recorder (default 8000)
 * `-o,--out <dir>` – output recordings directory (default `./recordings`)
-* `-e,--exec <path>` – path/name of rms-cast-recorder executable
+* `-e,--exec <path>` – path/name of radio-pipe executable
 * `-m,--mode <mode>` – rtl_fm mode (default `fm`)
 * `-d,--device <index>` – rtl_fm device index
 * `-g,--gain <gain>` – rtl_fm gain value
@@ -258,7 +258,7 @@ Every output format (`.wav`, `.mp3`, `.ogg`) can carry a `Comment` metadata fiel
 For the Live Listen feature in the PHP recordings interface, this field must contain
 `Source URL: http://xyz/abc.mp3`, pointing to the original stream.
 
-When recording from `--url`, RMSCastRecorder writes this source URL into WAV metadata.
+When recording from `--url`, RadioPipe writes this source URL into WAV metadata.
 If you convert files later, preserve this metadata so Live Listen continues to work.
 
 ## Options

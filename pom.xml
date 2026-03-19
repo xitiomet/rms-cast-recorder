@@ -2,16 +2,16 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.openstatic</groupId>
-  <artifactId>rms-cast-recorder</artifactId>
+  <artifactId>radio-pipe</artifactId>
   <version>1.0</version>
   <packaging>jar</packaging>
-  <name>RMSCastRecorder</name>
-  <url>https://openstatic.org/projects/rms-cast-recorder/</url>
+  <name>RadioPipe</name>
+  <url>https://openstatic.org/projects/radio-pipe/</url>
   <properties>
-    <mainClass>org.openstatic.RMSCastRecorderMain</mainClass>
+    <mainClass>org.openstatic.RadioPipeMain</mainClass>
     <maven.compiler.source>17</maven.compiler.source>
     <maven.compiler.target>17</maven.compiler.target>
-    <imageName>rms-cast-recorder</imageName>
+    <imageName>radio-pipe</imageName>
     <graalvm.version>22.1.0</graalvm.version>
     <skipNative>false</skipNative>
     <skipDeb>false</skipDeb>

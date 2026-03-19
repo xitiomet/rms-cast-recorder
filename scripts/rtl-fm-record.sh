@@ -6,7 +6,7 @@ usage() {
 	cat <<'EOF'
 Usage: ./scripts/rtl-fm-record.sh -f <frequency> [-q <squelch>] [-D <dcs>] [-C <ctcss>] [options]
 
-Record from RTL-SDR via rtl_fm and pipe audio into rms-cast-recorder.
+Record from RTL-SDR via rtl_fm and pipe audio into radio-pipe.
 
 Required:
   -f, --frequency <freq>   Frequency tuned for rtl_fm (examples: 146.520M, 462.550M, 915000000)
@@ -17,13 +17,13 @@ Optional:
 	-C, --ctcss <hz>         CTCSS gate tone for recorder in Hz (example: 100.0)
   -R, --sample-rate <hz>   Sample rate for both rtl_fm and recorder stdin/output (default: 8000)
   -o, --out <dir>          Output directory for recordings (default: ./recordings)
-  -e, --exec <path>        rms-cast-recorder executable (default: ./rms-cast-recorder)
+  -e, --exec <path>        radio-pipe executable (default: ./radio-pipe)
   -m, --mode <mode>        rtl_fm demod mode (default: fm)
   -d, --device <index>     rtl_fm device index
   -g, --gain <gain>        rtl_fm gain value
-  -t, --threshold <db>     rms-cast-recorder silence threshold dB (default: -50)
-  -s, --silence <seconds>  rms-cast-recorder silence duration seconds (default: 2)
-  -x, --on-write <program> rms-cast-recorder on-write hook
+  -t, --threshold <db>     radio-pipe silence threshold dB (default: -50)
+  -s, --silence <seconds>  radio-pipe silence duration seconds (default: 2)
+  -x, --on-write <program> radio-pipe on-write hook
   -h, --help               Show this help
 
 Example:
@@ -36,7 +36,7 @@ squelch="0"
 dcs=""
 ctcss=""
 out_dir="./recordings"
-recorder_bin="rms-cast-recorder"
+recorder_bin="radio-pipe"
 mode="fm"
 device=""
 gain=""

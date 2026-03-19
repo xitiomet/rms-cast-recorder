@@ -1,9 +1,9 @@
 [Desktop Entry]
 Version=1.0
-Name=RMSCastRecorder
+Name=RadioPipe
 Comment=A Fun Program
-Exec=/usr/bin/rms-cast-recorder
-Icon=/usr/share/icons/rms-cast-recorder/icon-64.png
+Exec=/usr/bin/radio-pipe
+Icon=/usr/share/icons/radio-pipe/icon-64.png
 Terminal=true
 Type=Application
 Categories=Utility;Application;

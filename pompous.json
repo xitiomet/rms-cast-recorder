@@ -1,8 +1,8 @@
 {
-    "projectName": "RMSCastRecorder",
+    "projectName": "RadioPipe",
     "domain": "openstatic.org",
-    "projectShortName": "rms-cast-recorder",
-    "mainClassName": "RMSCastRecorderMain",
+    "projectShortName": "radio-pipe",
+    "mainClassName": "RadioPipeMain",
     "projectDescription": "A Fun Program",
     "appType": "cli",
     "licType": "ACSL",

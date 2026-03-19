@@ -1,5 +1,5 @@
 #!/bin/bash
-# This script can be used with the -X option of rms-cast-recorder to
+# This script can be used with the -X option of radio-pipe to
 # convert a single wav file to ogg after recording is done. 
 # The wav file path is passed as an argument to the script.
 

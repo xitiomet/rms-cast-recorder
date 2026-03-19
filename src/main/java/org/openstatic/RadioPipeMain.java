@@ -8,7 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-public class RMSCastRecorderMain
+public class RadioPipeMain
 {
 
 
@@ -350,8 +350,8 @@ public class RMSCastRecorderMain
     public static void showHelp(Options options)
     {
         HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp( "rms-cast-recorder", "RMSCastRecorder: record shoutcast/icecast streams or stdin audio", options, "" );
-        System.err.println("For more information please visit https://openstatic.org/projects/rms-cast-recorder");
+        formatter.printHelp( "radio-pipe", "RadioPipe: record shoutcast/icecast streams or stdin audio", options, "" );
+        System.err.println("For more information please visit https://openstatic.org/projects/radio-pipe");
         System.exit(0);
     }
 }

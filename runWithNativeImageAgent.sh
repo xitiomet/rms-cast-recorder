@@ -1,2 +1,2 @@
 #!/bin/bash
-java -agentlib:native-image-agent=config-merge-dir=src/main/resources/META-INF/native-image/ -jar target/rms-cast-recorder*.jar $*
+java -agentlib:native-image-agent=config-merge-dir=src/main/resources/META-INF/native-image/ -jar target/radio-pipe*.jar $*
