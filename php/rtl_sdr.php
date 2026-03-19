@@ -25,6 +25,46 @@ $AUTO_RECOVERY_RESET_AFTER_SECONDS = isset($AUTO_RECOVERY_RESET_AFTER_SECONDS) ?
 $AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US = isset($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US) && is_array($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US)
 	? $AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US
 	: array(500000, 1000000, 1800000);
+$DEVICE_SCAN_MIN_INTERVAL_SECONDS = isset($DEVICE_SCAN_MIN_INTERVAL_SECONDS) ? max(10, (int)$DEVICE_SCAN_MIN_INTERVAL_SECONDS) : 60;
+$DEVICE_SCAN_CACHE_FILE = isset($DEVICE_SCAN_CACHE_FILE) && trim((string)$DEVICE_SCAN_CACHE_FILE) !== ''
+	? trim((string)$DEVICE_SCAN_CACHE_FILE)
+	: (__DIR__ . '/rtl_sdr_device_scan_cache.json');
+$ACTION_QUEUE_FILE = isset($ACTION_QUEUE_FILE) && trim((string)$ACTION_QUEUE_FILE) !== ''
+	? trim((string)$ACTION_QUEUE_FILE)
+	: (__DIR__ . '/rtl_sdr_action_queue.json');
+$ACTION_QUEUE_MIN_SPACING_SECONDS = isset($ACTION_QUEUE_MIN_SPACING_SECONDS)
+	? max(1, (int)$ACTION_QUEUE_MIN_SPACING_SECONDS)
+	: 2;
+$ACTION_QUEUE_MAX_ACTIONS_PER_TICK = isset($ACTION_QUEUE_MAX_ACTIONS_PER_TICK)
+	? max(1, min(5, (int)$ACTION_QUEUE_MAX_ACTIONS_PER_TICK))
+	: 1;
+$ACTION_QUEUE_STOP_START_DELAY_MS = isset($ACTION_QUEUE_STOP_START_DELAY_MS)
+	? max(0, (int)$ACTION_QUEUE_STOP_START_DELAY_MS)
+	: 1200;
+$ACTION_QUEUE_MAX_PENDING = isset($ACTION_QUEUE_MAX_PENDING)
+	? max(10, (int)$ACTION_QUEUE_MAX_PENDING)
+	: 200;
+$STREAM_FFMPEG_RETRY_ENABLED = isset($STREAM_FFMPEG_RETRY_ENABLED)
+	? parse_boolean_flag($STREAM_FFMPEG_RETRY_ENABLED, true)
+	: true;
+$STREAM_FFMPEG_RETRY_DELAY_SECONDS = isset($STREAM_FFMPEG_RETRY_DELAY_SECONDS)
+	? max(1, min(30, (int)$STREAM_FFMPEG_RETRY_DELAY_SECONDS))
+	: 2;
+$STREAM_FFMPEG_RETRY_MAX_ATTEMPTS = isset($STREAM_FFMPEG_RETRY_MAX_ATTEMPTS)
+	? max(0, (int)$STREAM_FFMPEG_RETRY_MAX_ATTEMPTS)
+	: 0;
+$STREAM_FFMPEG_TCP_TIMEOUT_US = isset($STREAM_FFMPEG_TCP_TIMEOUT_US)
+	? max(1000000, (int)$STREAM_FFMPEG_TCP_TIMEOUT_US)
+	: 15000000;
+$STREAM_FFMPEG_HTTP_MULTIPLE_REQUESTS = isset($STREAM_FFMPEG_HTTP_MULTIPLE_REQUESTS)
+	? parse_boolean_flag($STREAM_FFMPEG_HTTP_MULTIPLE_REQUESTS, true)
+	: true;
+$STREAM_FFMPEG_TCP_NODELAY = isset($STREAM_FFMPEG_TCP_NODELAY)
+	? parse_boolean_flag($STREAM_FFMPEG_TCP_NODELAY, true)
+	: true;
+$RMS_STDOUT_PAD_DELAY_MS = isset($RMS_STDOUT_PAD_DELAY_MS)
+	? max(0, min(5000, (int)$RMS_STDOUT_PAD_DELAY_MS))
+	: 300;
 
 function send_json(array $payload, int $statusCode = 200): void
 {
@@ -120,6 +160,11 @@ function normalize_runtime_state(array $rawState): array
 		}
 		if ($deviceIndex !== '') {
 			$config['deviceIndex'] = $deviceIndex;
+		}
+		$instance['pid'] = max(0, (int)($instance['pid'] ?? 0));
+		$instance['pgid'] = max(0, (int)($instance['pgid'] ?? 0));
+		if ((int)$instance['pgid'] <= 0 && (int)$instance['pid'] > 0) {
+			$instance['pgid'] = (int)$instance['pid'];
 		}
 		$instance['config'] = $config;
 
@@ -224,6 +269,39 @@ function save_desired_state(string $desiredStateFile, array $desiredState): bool
 	return file_put_contents($desiredStateFile, $encoded . "\n", LOCK_EX) !== false;
 }
 
+function acquire_runtime_state_lock(string $stateFile)
+{
+	$lockFile = $stateFile . '.lock';
+	$lockDir = dirname($lockFile);
+	if ($lockDir !== '' && $lockDir !== '.' && !is_dir($lockDir)) {
+		if (!@mkdir($lockDir, 0775, true) && !is_dir($lockDir)) {
+			return null;
+		}
+	}
+
+	$lockHandle = @fopen($lockFile, 'c+');
+	if ($lockHandle === false) {
+		return null;
+	}
+
+	if (!flock($lockHandle, LOCK_EX)) {
+		fclose($lockHandle);
+		return null;
+	}
+
+	return $lockHandle;
+}
+
+function release_runtime_state_lock($lockHandle): void
+{
+	if (!is_resource($lockHandle)) {
+		return;
+	}
+
+	flock($lockHandle, LOCK_UN);
+	fclose($lockHandle);
+}
+
 function device_is_desired_running(array $desiredState, string $deviceId, bool $default = true): bool
 {
 	$normalizedDeviceId = normalize_device_id($deviceId);
@@ -257,6 +335,409 @@ function set_device_desired_running(array &$desiredState, string $deviceId, bool
 	);
 
 	return true;
+}
+
+function get_action_queue_settings(): array
+{
+	global $ACTION_QUEUE_FILE;
+	global $ACTION_QUEUE_MIN_SPACING_SECONDS;
+	global $ACTION_QUEUE_MAX_ACTIONS_PER_TICK;
+	global $ACTION_QUEUE_STOP_START_DELAY_MS;
+	global $ACTION_QUEUE_MAX_PENDING;
+
+	$queueFile = trim((string)$ACTION_QUEUE_FILE);
+	if ($queueFile === '') {
+		$queueFile = __DIR__ . '/rtl_sdr_action_queue.json';
+	}
+
+	return array(
+		'queueFile' => $queueFile,
+		'minSpacingSeconds' => max(1, (int)$ACTION_QUEUE_MIN_SPACING_SECONDS),
+		'maxActionsPerTick' => max(1, min(5, (int)$ACTION_QUEUE_MAX_ACTIONS_PER_TICK)),
+		'stopStartDelayUs' => max(0, (int)$ACTION_QUEUE_STOP_START_DELAY_MS) * 1000,
+		'maxPending' => max(10, (int)$ACTION_QUEUE_MAX_PENDING),
+	);
+}
+
+function normalize_action_queue_item(array $item): ?array
+{
+	$action = strtolower(trim((string)($item['action'] ?? '')));
+	if ($action !== 'start' && $action !== 'retune') {
+		return null;
+	}
+
+	$config = isset($item['config']) && is_array($item['config'])
+		? $item['config']
+		: array();
+	$device = normalize_device_id((string)($item['device'] ?? ($config['device'] ?? '')));
+	if ($device !== '') {
+		$config['device'] = $device;
+	}
+
+	$id = trim((string)($item['id'] ?? ''));
+	if ($id === '') {
+		$id = uniqid('queue_', true);
+	}
+
+	return array(
+		'id' => $id,
+		'action' => $action,
+		'device' => $device,
+		'config' => $config,
+		'createdAt' => max(0, (int)($item['createdAt'] ?? time())),
+	);
+}
+
+function load_action_queue_data(string $queueFile): array
+{
+	$empty = array(
+		'items' => array(),
+		'lastProcessedAt' => 0,
+		'lastResult' => array(),
+	);
+
+	if ($queueFile === '' || !file_exists($queueFile)) {
+		return $empty;
+	}
+
+	$raw = @file_get_contents($queueFile);
+	if (!is_string($raw) || trim($raw) === '') {
+		return $empty;
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return $empty;
+	}
+
+	$itemsRaw = isset($decoded['items']) && is_array($decoded['items'])
+		? $decoded['items']
+		: array();
+	$items = array();
+	foreach ($itemsRaw as $rawItem) {
+		if (!is_array($rawItem)) {
+			continue;
+		}
+		$normalized = normalize_action_queue_item($rawItem);
+		if (is_array($normalized)) {
+			$items[] = $normalized;
+		}
+	}
+
+	$lastResult = isset($decoded['lastResult']) && is_array($decoded['lastResult'])
+		? $decoded['lastResult']
+		: array();
+
+	return array(
+		'items' => $items,
+		'lastProcessedAt' => max(0, (int)($decoded['lastProcessedAt'] ?? 0)),
+		'lastResult' => $lastResult,
+	);
+}
+
+function save_action_queue_data(string $queueFile, array $queue): bool
+{
+	if ($queueFile === '') {
+		return false;
+	}
+
+	$dir = dirname($queueFile);
+	if ($dir !== '' && $dir !== '.' && !is_dir($dir)) {
+		if (!@mkdir($dir, 0775, true) && !is_dir($dir)) {
+			return false;
+		}
+	}
+
+	$itemsRaw = isset($queue['items']) && is_array($queue['items']) ? $queue['items'] : array();
+	$items = array();
+	foreach ($itemsRaw as $rawItem) {
+		if (!is_array($rawItem)) {
+			continue;
+		}
+		$normalized = normalize_action_queue_item($rawItem);
+		if (is_array($normalized)) {
+			$items[] = $normalized;
+		}
+	}
+
+	$payload = array(
+		'items' => $items,
+		'lastProcessedAt' => max(0, (int)($queue['lastProcessedAt'] ?? 0)),
+		'lastResult' => isset($queue['lastResult']) && is_array($queue['lastResult'])
+			? $queue['lastResult']
+			: array(),
+	);
+
+	$encoded = json_encode($payload, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return false;
+	}
+
+	return @file_put_contents($queueFile, $encoded . "\n", LOCK_EX) !== false;
+}
+
+function is_watchdog_queue_worker_request(string $requestSource): bool
+{
+	if (strtolower(trim($requestSource)) !== 'watchdog') {
+		return false;
+	}
+
+	$remoteAddr = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+	return $remoteAddr === '127.0.0.1' || $remoteAddr === '::1' || $remoteAddr === '::ffff:127.0.0.1';
+}
+
+function enqueue_stream_action_request(string $action, array $config): array
+{
+	$normalized = normalize_action_queue_item(array(
+		'action' => $action,
+		'device' => (string)($config['device'] ?? ''),
+		'config' => $config,
+		'createdAt' => time(),
+	));
+	if (!is_array($normalized)) {
+		return array('ok' => false, 'error' => 'Unsupported queued action: ' . $action);
+	}
+
+	$settings = get_action_queue_settings();
+	$queueFile = (string)$settings['queueFile'];
+	$lockFile = $queueFile . '.lock';
+	$lockHandle = @fopen($lockFile, 'c+');
+	if ($lockHandle === false) {
+		return array('ok' => false, 'error' => 'Failed to open action queue lock file.');
+	}
+
+	if (!flock($lockHandle, LOCK_EX)) {
+		fclose($lockHandle);
+		return array('ok' => false, 'error' => 'Failed to lock action queue file.');
+	}
+
+	$queue = load_action_queue_data($queueFile);
+	$existingItems = isset($queue['items']) && is_array($queue['items']) ? $queue['items'] : array();
+	$queue['items'] = array();
+	$targetDevice = normalize_device_id((string)($normalized['device'] ?? ''));
+
+	foreach ($existingItems as $existingItem) {
+		if (!is_array($existingItem)) {
+			continue;
+		}
+		$existingNormalized = normalize_action_queue_item($existingItem);
+		if (!is_array($existingNormalized)) {
+			continue;
+		}
+
+		$existingDevice = normalize_device_id((string)($existingNormalized['device'] ?? ''));
+		if ($targetDevice !== '' && $existingDevice !== '' && $existingDevice === $targetDevice) {
+			continue;
+		}
+
+		$queue['items'][] = $existingNormalized;
+	}
+
+	$queue['items'][] = $normalized;
+	$maxPending = max(10, (int)($settings['maxPending'] ?? 200));
+	while (count($queue['items']) > $maxPending) {
+		array_shift($queue['items']);
+	}
+
+	$saveOk = save_action_queue_data($queueFile, $queue);
+	flock($lockHandle, LOCK_UN);
+	fclose($lockHandle);
+
+	if (!$saveOk) {
+		return array('ok' => false, 'error' => 'Failed to save action queue file.');
+	}
+
+	return array(
+		'ok' => true,
+		'id' => (string)$normalized['id'],
+		'position' => count($queue['items']),
+		'device' => (string)($normalized['device'] ?? ''),
+	);
+}
+
+function execute_queued_stream_action_item(array $item, array &$state, array &$desiredState, string $logDir, string $defaultOutputDir, int $stopStartDelayUs): array
+{
+	$action = strtolower(trim((string)($item['action'] ?? 'retune')));
+	$payload = isset($item['config']) && is_array($item['config']) ? $item['config'] : array();
+	$requestedDevice = normalize_device_id((string)($payload['device'] ?? ($item['device'] ?? '')));
+	$autoRecoveryEnabled = resolve_auto_recovery_enabled_from_payload($payload);
+
+	try {
+		$config = normalize_config($payload, $defaultOutputDir);
+	} catch (RuntimeException $error) {
+		return array(
+			'ok' => false,
+			'device' => $requestedDevice,
+			'message' => 'Queued ' . strtoupper($action) . ' rejected: ' . $error->getMessage(),
+			'stateChanged' => false,
+			'desiredStateChanged' => false,
+		);
+	}
+
+	$deviceId = normalize_device_id((string)($config['device'] ?? $requestedDevice));
+	$stateChanged = false;
+	$desiredStateChanged = false;
+
+	$existingStateKey = find_state_device_key($state, $deviceId);
+	if ($existingStateKey !== '') {
+		$existingPid = isset($state[$existingStateKey]['pid']) ? (int)$state[$existingStateKey]['pid'] : 0;
+		$existingProcessGroupId = get_instance_process_group_id((array)$state[$existingStateKey]);
+		stop_instance_by_pid($existingPid, $existingProcessGroupId);
+		unset($state[$existingStateKey]);
+		$stateChanged = true;
+		if ($stopStartDelayUs > 0) {
+			usleep($stopStartDelayUs);
+		}
+	}
+
+	$startResult = start_instance($config, $logDir);
+	if (($startResult['ok'] ?? false) !== true) {
+		$errorMessage = (string)($startResult['error'] ?? 'Failed to start queued action.');
+		return array(
+			'ok' => false,
+			'device' => $deviceId,
+			'message' => 'Queued ' . strtoupper($action) . ' failed: ' . $errorMessage,
+			'stateChanged' => $stateChanged,
+			'desiredStateChanged' => false,
+		);
+	}
+
+	$runtimeConfig = isset($startResult['config']) && is_array($startResult['config'])
+		? $startResult['config']
+		: $config;
+	$runtimeDeviceId = normalize_device_id((string)($runtimeConfig['device'] ?? $deviceId));
+
+	$state[$runtimeDeviceId] = build_instance_state($runtimeConfig, $startResult, $autoRecoveryEnabled, 0);
+	$stateChanged = true;
+	if (set_device_desired_running($desiredState, $runtimeDeviceId, true)) {
+		$desiredStateChanged = true;
+	}
+
+	return array(
+		'ok' => true,
+		'device' => $runtimeDeviceId,
+		'message' => 'Queued ' . strtoupper($action) . ' applied to device ' . $runtimeDeviceId . '.',
+		'stateChanged' => $stateChanged,
+		'desiredStateChanged' => $desiredStateChanged,
+	);
+}
+
+function process_queued_stream_actions(array &$state, array &$desiredState, string $logDir, string $defaultOutputDir): array
+{
+	$settings = get_action_queue_settings();
+	$queueFile = (string)$settings['queueFile'];
+	$lockFile = $queueFile . '.lock';
+	$lockHandle = @fopen($lockFile, 'c+');
+	if ($lockHandle === false) {
+		return array('processed' => 0, 'pending' => 0, 'busy' => false, 'stateChanged' => false, 'desiredStateChanged' => false);
+	}
+
+	if (!flock($lockHandle, LOCK_EX | LOCK_NB)) {
+		fclose($lockHandle);
+		return array('processed' => 0, 'pending' => 0, 'busy' => true, 'stateChanged' => false, 'desiredStateChanged' => false);
+	}
+
+	$queue = load_action_queue_data($queueFile);
+	$processed = array();
+	$stateChanged = false;
+	$desiredStateChanged = false;
+	$maxActionsPerTick = max(1, (int)($settings['maxActionsPerTick'] ?? 1));
+	$minSpacingSeconds = max(1, (int)($settings['minSpacingSeconds'] ?? 2));
+	$stopStartDelayUs = max(0, (int)($settings['stopStartDelayUs'] ?? 0));
+
+	for ($i = 0; $i < $maxActionsPerTick; $i++) {
+		$items = isset($queue['items']) && is_array($queue['items']) ? $queue['items'] : array();
+		if (count($items) === 0) {
+			break;
+		}
+
+		$now = time();
+		$lastProcessedAt = max(0, (int)($queue['lastProcessedAt'] ?? 0));
+		if ($lastProcessedAt > 0 && ($now - $lastProcessedAt) < $minSpacingSeconds) {
+			break;
+		}
+
+		$current = normalize_action_queue_item((array)$items[0]);
+		array_shift($queue['items']);
+		if (!is_array($current)) {
+			$queue['lastProcessedAt'] = $now;
+			continue;
+		}
+
+		$result = execute_queued_stream_action_item($current, $state, $desiredState, $logDir, $defaultOutputDir, $stopStartDelayUs);
+		$stateChanged = $stateChanged || (bool)($result['stateChanged'] ?? false);
+		$desiredStateChanged = $desiredStateChanged || (bool)($result['desiredStateChanged'] ?? false);
+
+		$queue['lastProcessedAt'] = time();
+		$summary = array(
+			'id' => (string)($current['id'] ?? ''),
+			'action' => (string)($current['action'] ?? ''),
+			'device' => (string)($result['device'] ?? ($current['device'] ?? '')),
+			'ok' => (bool)($result['ok'] ?? false),
+			'message' => (string)($result['message'] ?? ''),
+			'processedAt' => (int)$queue['lastProcessedAt'],
+		);
+		$queue['lastResult'] = $summary;
+		$processed[] = $summary;
+	}
+
+	$pending = isset($queue['items']) && is_array($queue['items']) ? count($queue['items']) : 0;
+	$saveOk = save_action_queue_data($queueFile, $queue);
+
+	flock($lockHandle, LOCK_UN);
+	fclose($lockHandle);
+
+	if (!$saveOk) {
+		return array('processed' => 0, 'pending' => $pending, 'busy' => false, 'stateChanged' => $stateChanged, 'desiredStateChanged' => $desiredStateChanged);
+	}
+
+	return array(
+		'processed' => count($processed),
+		'pending' => $pending,
+		'busy' => false,
+		'results' => $processed,
+		'stateChanged' => $stateChanged,
+		'desiredStateChanged' => $desiredStateChanged,
+	);
+}
+
+function get_action_queue_snapshot(): array
+{
+	$settings = get_action_queue_settings();
+	$queueFile = (string)($settings['queueFile'] ?? '');
+	$queue = load_action_queue_data($queueFile);
+
+	$items = isset($queue['items']) && is_array($queue['items']) ? $queue['items'] : array();
+	$pending = count($items);
+	$lastProcessedAt = max(0, (int)($queue['lastProcessedAt'] ?? 0));
+
+	$lastResultRaw = isset($queue['lastResult']) && is_array($queue['lastResult'])
+		? $queue['lastResult']
+		: array();
+	$lastResult = array(
+		'id' => trim((string)($lastResultRaw['id'] ?? '')),
+		'action' => strtolower(trim((string)($lastResultRaw['action'] ?? ''))),
+		'device' => normalize_device_id((string)($lastResultRaw['device'] ?? '')),
+		'ok' => parse_boolean_flag($lastResultRaw['ok'] ?? false, false),
+		'message' => trim((string)($lastResultRaw['message'] ?? '')),
+		'processedAt' => max(0, (int)($lastResultRaw['processedAt'] ?? 0)),
+	);
+
+	if (
+		$lastResult['id'] === ''
+		&& $lastResult['action'] === ''
+		&& $lastResult['device'] === ''
+		&& $lastResult['message'] === ''
+		&& (int)$lastResult['processedAt'] <= 0
+	) {
+		$lastResult = array();
+	}
+
+	return array(
+		'pending' => $pending,
+		'lastProcessedAt' => $lastProcessedAt,
+		'lastResult' => $lastResult,
+	);
 }
 
 function normalize_streaming_servers(array $rawServers): array
@@ -640,6 +1121,299 @@ function sync_ui_settings_with_running_state(string $uiSettingsFile, array $stat
 	return $settings;
 }
 
+function discover_managed_pipeline_groups(): array
+{
+	$output = shell_exec('bash -lc ' . escapeshellarg('ps -eo pid=,pgid=,etimes=,args= 2>/dev/null'));
+	if (!is_string($output) || trim($output) === '') {
+		return array();
+	}
+
+	$groupedMembers = array();
+	$lines = preg_split('/\r\n|\r|\n/', $output);
+	if (!is_array($lines)) {
+		return array();
+	}
+
+	foreach ($lines as $line) {
+		$matches = array();
+		if (preg_match('/^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(.*)$/', (string)$line, $matches) !== 1) {
+			continue;
+		}
+
+		$pid = max(0, (int)$matches[1]);
+		$processGroupId = max(0, (int)$matches[2]);
+		$elapsedSeconds = max(0, (int)$matches[3]);
+		$args = trim((string)$matches[4]);
+		if ($pid <= 0 || $processGroupId <= 0 || $args === '') {
+			continue;
+		}
+
+		$containsRtlFm = stripos($args, 'rtl_fm') !== false;
+		$containsRecorder = stripos($args, 'rms-cast-recorder') !== false;
+		$containsFfmpeg = stripos($args, 'ffmpeg') !== false;
+		$containsShellPipeline = stripos($args, 'sh -c rtl_fm') !== false;
+		if (!$containsRtlFm && !$containsRecorder && !$containsFfmpeg && !$containsShellPipeline) {
+			continue;
+		}
+
+		if (!isset($groupedMembers[$processGroupId])) {
+			$groupedMembers[$processGroupId] = array(
+				'members' => array(),
+				'hasRtlFm' => false,
+				'hasRecorder' => false,
+				'hasFfmpeg' => false,
+			);
+		}
+
+		$groupedMembers[$processGroupId]['members'][] = array(
+			'pid' => $pid,
+			'elapsedSeconds' => $elapsedSeconds,
+			'args' => $args,
+		);
+		$groupedMembers[$processGroupId]['hasRtlFm'] = $groupedMembers[$processGroupId]['hasRtlFm'] || $containsRtlFm;
+		$groupedMembers[$processGroupId]['hasRecorder'] = $groupedMembers[$processGroupId]['hasRecorder'] || $containsRecorder;
+		$groupedMembers[$processGroupId]['hasFfmpeg'] = $groupedMembers[$processGroupId]['hasFfmpeg'] || $containsFfmpeg;
+	}
+
+	$managedGroups = array();
+	$now = time();
+	foreach ($groupedMembers as $processGroupId => $group) {
+		if (!(bool)($group['hasRtlFm'] ?? false)) {
+			continue;
+		}
+		if (!(bool)($group['hasRecorder'] ?? false) && !(bool)($group['hasFfmpeg'] ?? false)) {
+			continue;
+		}
+
+		$members = isset($group['members']) && is_array($group['members']) ? $group['members'] : array();
+		$representative = array('pid' => 0, 'elapsedSeconds' => 0, 'args' => '');
+		$rtlMember = array('pid' => 0, 'elapsedSeconds' => 0, 'args' => '');
+		$maxElapsedSeconds = 0;
+		$leaderPid = 0;
+
+		foreach ($members as $member) {
+			if (!is_array($member)) {
+				continue;
+			}
+
+			$memberArgs = trim((string)($member['args'] ?? ''));
+			if ($memberArgs === '') {
+				continue;
+			}
+
+			$memberElapsedSeconds = max(0, (int)($member['elapsedSeconds'] ?? 0));
+			$memberPid = max(0, (int)($member['pid'] ?? 0));
+			$maxElapsedSeconds = max($maxElapsedSeconds, $memberElapsedSeconds);
+			if ($leaderPid === 0 && $memberPid === (int)$processGroupId) {
+				$leaderPid = $memberPid;
+			}
+
+			if ($rtlMember['args'] === '' && stripos($memberArgs, 'rtl_fm') !== false) {
+				$rtlMember = $member;
+			}
+
+			if (stripos($memberArgs, 'sh -c rtl_fm') !== false) {
+				$representative = $member;
+				break;
+			}
+
+			if (strlen($memberArgs) > strlen((string)($representative['args'] ?? ''))) {
+				$representative = $member;
+			}
+		}
+
+		$representativeArgs = trim((string)($representative['args'] ?? ''));
+		$rtlMemberArgs = trim((string)($rtlMember['args'] ?? ''));
+		$command = $representativeArgs !== '' ? $representativeArgs : $rtlMemberArgs;
+		if ($command === '') {
+			continue;
+		}
+
+		$deviceIndex = '';
+		$indexCandidates = array($command);
+		if ($rtlMemberArgs !== '' && $rtlMemberArgs !== $command) {
+			$indexCandidates[] = $rtlMemberArgs;
+		}
+		foreach ($indexCandidates as $indexCandidate) {
+			$indexMatches = array();
+			if (preg_match('/(?:^|\s)-d\s+([0-9]+)(?:\s|$)/', (string)$indexCandidate, $indexMatches) === 1) {
+				$deviceIndex = normalize_device_index((string)$indexMatches[1]);
+				if ($deviceIndex !== '') {
+					break;
+				}
+			}
+		}
+		if ($deviceIndex === '') {
+			continue;
+		}
+
+		$deviceSerial = '';
+		$serialMatches = array();
+		if (preg_match('/RTL-SN\s+([A-Za-z0-9._-]+)/', $command, $serialMatches) === 1) {
+			$deviceSerial = normalize_device_serial((string)$serialMatches[1]);
+		}
+
+		if ($leaderPid === 0) {
+			$leaderPid = max(0, (int)($representative['pid'] ?? 0));
+		}
+		if ($leaderPid === 0) {
+			$leaderPid = max(0, (int)($rtlMember['pid'] ?? 0));
+		}
+		if ($leaderPid === 0) {
+			$leaderPid = (int)$processGroupId;
+		}
+
+		$managedGroups[] = array(
+			'pid' => $leaderPid,
+			'pgid' => (int)$processGroupId,
+			'startedAt' => max(0, $now - $maxElapsedSeconds),
+			'command' => $command,
+			'deviceIndex' => $deviceIndex,
+			'deviceSerial' => $deviceSerial,
+		);
+	}
+
+	return $managedGroups;
+}
+
+function find_matching_device_config_for_live_group(array $deviceConfigs, array $liveGroup): array
+{
+	$deviceSerial = normalize_device_serial((string)($liveGroup['deviceSerial'] ?? ''));
+	if ($deviceSerial !== '') {
+		$serialDeviceId = 'sn:' . $deviceSerial;
+		if (isset($deviceConfigs[$serialDeviceId]) && is_array($deviceConfigs[$serialDeviceId])) {
+			return $deviceConfigs[$serialDeviceId];
+		}
+	}
+
+	$deviceIndex = normalize_device_index((string)($liveGroup['deviceIndex'] ?? ''));
+	if ($deviceIndex === '') {
+		return array();
+	}
+
+	foreach ($deviceConfigs as $config) {
+		if (!is_array($config)) {
+			continue;
+		}
+
+		$configIndex = normalize_device_index((string)($config['deviceIndex'] ?? ''));
+		if ($configIndex === '' || $configIndex !== $deviceIndex) {
+			continue;
+		}
+
+		$configSerial = normalize_device_serial((string)($config['deviceSerial'] ?? ''));
+		if ($deviceSerial !== '' && $configSerial !== '' && $configSerial !== $deviceSerial) {
+			continue;
+		}
+
+		return $config;
+	}
+
+	return array();
+}
+
+function reconcile_runtime_state_with_live_process_groups(array &$state, string $logDir, string $uiSettingsFile): bool
+{
+	$settings = normalize_ui_settings(load_ui_settings($uiSettingsFile));
+	$deviceConfigs = isset($settings['deviceConfigs']) && is_array($settings['deviceConfigs'])
+		? $settings['deviceConfigs']
+		: array();
+	$liveGroups = discover_managed_pipeline_groups();
+	if (count($liveGroups) === 0) {
+		return false;
+	}
+
+	$changed = false;
+	foreach ($liveGroups as $liveGroup) {
+		if (!is_array($liveGroup)) {
+			continue;
+		}
+
+		$deviceIndex = normalize_device_index((string)($liveGroup['deviceIndex'] ?? ''));
+		$deviceSerial = normalize_device_serial((string)($liveGroup['deviceSerial'] ?? ''));
+		$fallbackDeviceId = build_device_id_from_index_and_serial($deviceIndex, $deviceSerial);
+		$config = find_matching_device_config_for_live_group($deviceConfigs, $liveGroup);
+		if (count($config) === 0) {
+			if ($fallbackDeviceId === '') {
+				continue;
+			}
+
+			$config = array(
+				'device' => $fallbackDeviceId,
+				'deviceIndex' => $deviceIndex,
+				'deviceSerial' => $deviceSerial,
+			);
+		}
+
+		$configDeviceId = normalize_device_id((string)($config['device'] ?? $fallbackDeviceId));
+		$configSerial = normalize_device_serial((string)($config['deviceSerial'] ?? $deviceSerial));
+		if ($configSerial === '' && $deviceSerial !== '') {
+			$configSerial = $deviceSerial;
+		}
+		if ($configSerial !== '') {
+			$configDeviceId = 'sn:' . $configSerial;
+			$config['deviceSerial'] = $configSerial;
+		}
+		if ($configDeviceId === '') {
+			$configDeviceId = $fallbackDeviceId;
+		}
+		if ($configDeviceId === '') {
+			continue;
+		}
+
+		$config['device'] = $configDeviceId;
+		if ($deviceIndex !== '') {
+			$config['deviceIndex'] = $deviceIndex;
+		}
+
+		$existingStateKey = find_state_device_key($state, $configDeviceId);
+		$logFile = '';
+		$logPath = resolve_log_path_for_device($logDir, $configDeviceId, $state);
+		if ($logPath !== '') {
+			$logFile = basename($logPath);
+		}
+
+		$autoRecoveryEnabled = count($config) > 3
+			? resolve_auto_recovery_enabled_from_payload($config)
+			: false;
+		$startResult = array(
+			'pid' => (int)($liveGroup['pid'] ?? 0),
+			'pgid' => (int)($liveGroup['pgid'] ?? 0),
+			'logFile' => $logFile,
+			'command' => mask_sensitive_command_for_log((string)($liveGroup['command'] ?? '')),
+		);
+		$rebuiltInstance = build_instance_state($config, $startResult, $autoRecoveryEnabled, 0);
+		$rebuiltInstance['startedAt'] = max(0, (int)($liveGroup['startedAt'] ?? time()));
+
+		if ($existingStateKey === '') {
+			$state[$configDeviceId] = $rebuiltInstance;
+			$changed = true;
+			continue;
+		}
+
+		$existingInstance = isset($state[$existingStateKey]) && is_array($state[$existingStateKey])
+			? $state[$existingStateKey]
+			: array();
+		$needsUpdate =
+			!is_instance_running($existingInstance)
+			|| (int)($existingInstance['pid'] ?? 0) !== (int)($rebuiltInstance['pid'] ?? 0)
+			|| (int)($existingInstance['pgid'] ?? 0) !== (int)($rebuiltInstance['pgid'] ?? 0)
+			|| trim((string)($existingInstance['logFile'] ?? '')) === ''
+			|| trim((string)($existingInstance['command'] ?? '')) === '';
+		if (!$needsUpdate) {
+			continue;
+		}
+
+		if ($existingStateKey !== $configDeviceId) {
+			unset($state[$existingStateKey]);
+		}
+		$state[$configDeviceId] = $rebuiltInstance;
+		$changed = true;
+	}
+
+	return $changed;
+}
+
 function load_templates(string $filePath, string $legacyUiSettingsFile = ''): array
 {
 	if (!file_exists($filePath)) {
@@ -730,6 +1504,56 @@ function is_process_running(int $pid): bool
 	$checkCommand = 'kill -0 ' . $pid . ' >/dev/null 2>&1; echo $?';
 	$result = shell_exec('bash -lc ' . escapeshellarg($checkCommand));
 	return trim((string)$result) === '0';
+}
+
+function is_process_group_running(int $processGroupId): bool
+{
+	if ($processGroupId <= 0) {
+		return false;
+	}
+
+	$checkCommand = 'kill -0 -- -' . $processGroupId . ' >/dev/null 2>&1; echo $?';
+	$result = shell_exec('bash -lc ' . escapeshellarg($checkCommand));
+	return trim((string)$result) === '0';
+}
+
+function lookup_process_group_id(int $pid): int
+{
+	if ($pid <= 0) {
+		return 0;
+	}
+
+	$lookupCommand = 'ps -o pgid= -p ' . $pid . ' 2>/dev/null';
+	$result = shell_exec('bash -lc ' . escapeshellarg($lookupCommand));
+	$processGroupId = (int)trim((string)$result);
+	return $processGroupId > 0 ? $processGroupId : 0;
+}
+
+function get_instance_process_group_id(array $instance): int
+{
+	$processGroupId = max(0, (int)($instance['pgid'] ?? 0));
+	if ($processGroupId > 0) {
+		return $processGroupId;
+	}
+
+	$pid = max(0, (int)($instance['pid'] ?? 0));
+	if ($pid <= 0) {
+		return 0;
+	}
+
+	$resolvedProcessGroupId = lookup_process_group_id($pid);
+	return $resolvedProcessGroupId > 0 ? $resolvedProcessGroupId : $pid;
+}
+
+function is_instance_running(array $instance): bool
+{
+	$processGroupId = get_instance_process_group_id($instance);
+	if ($processGroupId > 0 && is_process_group_running($processGroupId)) {
+		return true;
+	}
+
+	$pid = max(0, (int)($instance['pid'] ?? 0));
+	return $pid > 0 && is_process_running($pid);
 }
 
 function parse_boolean_flag($value, bool $default): bool
@@ -889,6 +1713,7 @@ function build_instance_state(array $config, array $startResult, bool $autoRecov
 {
 	return array(
 		'pid' => (int)($startResult['pid'] ?? 0),
+		'pgid' => max(0, (int)($startResult['pgid'] ?? ($startResult['pid'] ?? 0))),
 		'startedAt' => time(),
 		'logFile' => (string)($startResult['logFile'] ?? ''),
 		'command' => (string)($startResult['command'] ?? ''),
@@ -951,7 +1776,8 @@ function cleanup_stale_instances(array &$state, string $logDir, array &$desiredS
 		}
 
 		$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
-		$running = is_process_running($pid);
+		$processGroupId = get_instance_process_group_id($instance);
+		$running = is_instance_running($instance);
 		$desiredRunning = device_is_desired_running($desiredState, $deviceId, true);
 
 		if (!$desiredRunning) {
@@ -963,7 +1789,7 @@ function cleanup_stale_instances(array &$state, string $logDir, array &$desiredS
 					'RECOVERY',
 					'Desired state is stopped; terminating process and skipping auto-recovery.'
 				);
-				stop_instance_by_pid($pid);
+				stop_instance_by_pid($pid, $processGroupId);
 			}
 
 			unset($state[$device]);
@@ -1016,11 +1842,12 @@ function cleanup_stale_instances(array &$state, string $logDir, array &$desiredS
 		$nextRetryAt = max(0, (int)($instance['recoveryNextRetryAt'] ?? 0));
 
 		if ($nextRetryAt > $now) {
-			if ($pid !== 0 || !isset($instance['autoRecoveryEnabled'])) {
+			if ($pid !== 0 || $processGroupId !== 0 || !isset($instance['autoRecoveryEnabled'])) {
 				$changed = true;
 			}
 			$state[$deviceId] = $instance;
 			$state[$deviceId]['pid'] = 0;
+			$state[$deviceId]['pgid'] = 0;
 			$state[$deviceId]['autoRecoveryEnabled'] = $autoRecoveryEnabled;
 			if ($deviceId !== (string)$device) {
 				unset($state[$device]);
@@ -1081,6 +1908,7 @@ function cleanup_stale_instances(array &$state, string $logDir, array &$desiredS
 
 		$state[$deviceId] = $instance;
 		$state[$deviceId]['pid'] = 0;
+		$state[$deviceId]['pgid'] = 0;
 		$state[$deviceId]['autoRecoveryEnabled'] = $autoRecoveryEnabled;
 		$state[$deviceId]['recoveryAttempts'] = $attemptNumber;
 		$state[$deviceId]['recoveryLastFailureAt'] = $now;
@@ -1643,7 +2471,7 @@ function build_log_payload_for_device(string $logDir, string $deviceId, array $s
 	$logPath = resolve_log_path_for_device($logDir, $lookupDeviceId, $state);
 	$running = false;
 	if ($stateDeviceKey !== '' && isset($state[$stateDeviceKey])) {
-		$running = is_process_running((int)($state[$stateDeviceKey]['pid'] ?? 0));
+		$running = is_instance_running((array)$state[$stateDeviceKey]);
 	}
 
 	return array(
@@ -1674,12 +2502,21 @@ function force_release_device(string $deviceId): void
 	usleep(1500000);
 }
 
-function launch_pipeline_process(string $pipelineCommand, string $logPath): int
+function launch_pipeline_process(string $pipelineCommand, string $logPath): array
 {
 	$deviceCommand = wrap_for_device_access('nohup setsid sh -c ' . escapeshellarg($pipelineCommand) . ' >> ' . escapeshellarg($logPath) . ' 2>&1 < /dev/null & echo $!');
 	$wrappedCommand = $deviceCommand;
 	$pidOutput = shell_exec('bash -lc ' . escapeshellarg($wrappedCommand));
-	return (int)trim((string)$pidOutput);
+	$pid = (int)trim((string)$pidOutput);
+	$processGroupId = $pid > 0 ? lookup_process_group_id($pid) : 0;
+	if ($processGroupId <= 0 && $pid > 0) {
+		$processGroupId = $pid;
+	}
+
+	return array(
+		'pid' => $pid,
+		'pgid' => $processGroupId,
+	);
 }
 
 function summarize_frequency_for_stream_label(string $frequency): string
@@ -1707,6 +2544,136 @@ function summarize_frequency_for_stream_label(string $frequency): string
 	}
 
 	return $normalized;
+}
+
+function normalize_stream_mount_name_segment(string $streamName): string
+{
+	$raw = strtolower(trim($streamName));
+	if ($raw === '') {
+		return 'rtl-sdr';
+	}
+
+	if (function_exists('iconv')) {
+		$converted = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $raw);
+		if (is_string($converted) && trim($converted) !== '') {
+			$raw = strtolower($converted);
+		}
+	}
+
+	$segment = preg_replace('/[^a-z0-9._-]+/', '-', $raw) ?? '';
+	$segment = preg_replace('/-+/', '-', $segment) ?? $segment;
+	$segment = trim($segment, '-._');
+	if ($segment === '') {
+		return 'rtl-sdr';
+	}
+
+	return $segment;
+}
+
+function build_default_stream_mount_from_name(string $streamName, string $streamFormat): string
+{
+	$format = strtolower(trim($streamFormat)) === 'ogg' ? 'ogg' : 'mp3';
+	$segment = normalize_stream_mount_name_segment($streamName);
+	return '/' . $segment . '.' . $format;
+}
+
+function build_default_stream_mount_from_device_index(string $deviceIndex, string $streamFormat): string
+{
+	$format = strtolower(trim($streamFormat)) === 'ogg' ? 'ogg' : 'mp3';
+	$normalizedIndex = normalize_device_index($deviceIndex);
+	if ($normalizedIndex === '') {
+		$normalizedIndex = '0';
+	}
+
+	return '/dev' . $normalizedIndex . '.' . $format;
+}
+
+function normalize_stream_mount_link_mode($value): string
+{
+	$mode = strtolower(trim((string)$value));
+	if (in_array($mode, array('device', 'dev', 'link-device', 'device-index', 'index'), true)) {
+		return 'device';
+	}
+
+	if (in_array($mode, array('name', 'stream', 'stream-name', 'linked', 'auto'), true)) {
+		return 'name';
+	}
+
+	if (in_array($mode, array('manual', 'none', 'off', 'custom'), true)) {
+		return 'manual';
+	}
+
+	return '';
+}
+
+function infer_stream_mount_follow_device(array $input, string $streamMount, string $deviceIndex, string $streamFormat): bool
+{
+	if (array_key_exists('streamMountLinkMode', $input)) {
+		$linkMode = normalize_stream_mount_link_mode($input['streamMountLinkMode']);
+		if ($linkMode !== '') {
+			return $linkMode === 'device';
+		}
+	}
+
+	if (array_key_exists('streamMountFollowDevice', $input)) {
+		return parse_boolean_flag($input['streamMountFollowDevice'], false);
+	}
+
+	if (array_key_exists('streamMountLinkDevice', $input)) {
+		return parse_boolean_flag($input['streamMountLinkDevice'], false);
+	}
+
+	if (array_key_exists('streamMountLinkedToDevice', $input)) {
+		return parse_boolean_flag($input['streamMountLinkedToDevice'], false);
+	}
+
+	$normalizedMount = trim($streamMount);
+	if ($normalizedMount === '') {
+		return false;
+	}
+	if (strpos($normalizedMount, '/') !== 0) {
+		$normalizedMount = '/' . $normalizedMount;
+	}
+
+	$format = strtolower(trim($streamFormat)) === 'ogg' ? 'ogg' : 'mp3';
+	$deviceDefault = build_default_stream_mount_from_device_index($deviceIndex, $format);
+	return strcasecmp($normalizedMount, $deviceDefault) === 0;
+}
+
+function infer_stream_mount_follow_name(array $input, string $streamMount, string $streamName, string $streamFormat): bool
+{
+	if (array_key_exists('streamMountLinkMode', $input)) {
+		$linkMode = normalize_stream_mount_link_mode($input['streamMountLinkMode']);
+		if ($linkMode !== '') {
+			return $linkMode === 'name';
+		}
+	}
+
+	if (array_key_exists('streamMountFollowName', $input)) {
+		return parse_boolean_flag($input['streamMountFollowName'], true);
+	}
+
+	if (array_key_exists('streamMountLinked', $input)) {
+		return parse_boolean_flag($input['streamMountLinked'], true);
+	}
+
+	if (array_key_exists('streamMountAuto', $input)) {
+		return parse_boolean_flag($input['streamMountAuto'], true);
+	}
+
+	$normalizedMount = trim($streamMount);
+	if ($normalizedMount === '') {
+		return true;
+	}
+	if (strpos($normalizedMount, '/') !== 0) {
+		$normalizedMount = '/' . $normalizedMount;
+	}
+
+	$format = strtolower(trim($streamFormat)) === 'ogg' ? 'ogg' : 'mp3';
+	$legacyDefault = '/rtl-sdr.' . $format;
+	$nameDefault = build_default_stream_mount_from_name($streamName, $format);
+ 
+	return strcasecmp($normalizedMount, $legacyDefault) === 0 || strcasecmp($normalizedMount, $nameDefault) === 0;
 }
 
 function normalize_config(array $input, string $defaultOutputDir): array
@@ -1870,6 +2837,32 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		$streamName = 'RTLSDR Device ' . $streamDeviceLabel . ' (' . strtoupper($mode) . ' ' . $streamFrequencyLabel . ')';
 	}
 
+	$requestedMountLinkMode = normalize_stream_mount_link_mode($input['streamMountLinkMode'] ?? '');
+	if ($requestedMountLinkMode !== '') {
+		$streamMountFollowDevice = $requestedMountLinkMode === 'device';
+		if ($requestedMountLinkMode === 'name') {
+			$streamMountFollowName = true;
+		} elseif ($requestedMountLinkMode === 'manual') {
+			$streamMountFollowName = false;
+		} else {
+			$streamMountFollowName = array_key_exists('streamMountFollowName', $input)
+				? parse_boolean_flag($input['streamMountFollowName'], true)
+				: true;
+		}
+	} else {
+		$streamMountFollowDevice = infer_stream_mount_follow_device($input, $streamMount, $deviceIndex, $streamFormat);
+		$streamMountFollowName = infer_stream_mount_follow_name($input, $streamMount, $streamName, $streamFormat);
+	}
+
+	if ($streamMountFollowDevice) {
+		$streamMount = build_default_stream_mount_from_device_index($deviceIndex, $streamFormat);
+	} elseif ($streamMountFollowName || $streamMount === '') {
+		$streamMount = build_default_stream_mount_from_name($streamName, $streamFormat);
+	}
+	$streamMountLinkMode = $streamMountFollowDevice
+		? 'device'
+		: ($streamMountFollowName ? 'name' : 'manual');
+
 	if ($streamEnabled) {
 		if ($streamTarget === '') {
 			throw new RuntimeException('Target server:port is required when Stream output is enabled.');
@@ -1884,7 +2877,9 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		}
 
 		if ($streamMount === '') {
-			$streamMount = '/rtl-sdr.' . $streamFormat;
+			$streamMount = $streamMountFollowDevice
+				? build_default_stream_mount_from_device_index($deviceIndex, $streamFormat)
+				: build_default_stream_mount_from_name($streamName, $streamFormat);
 		}
 		if (strpos($streamMount, '/') !== 0) {
 			$streamMount = '/' . $streamMount;
@@ -1982,6 +2977,9 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'streamBitrate' => $streamBitrateValue,
 		'streamTarget' => $streamTarget,
 		'streamMount' => $streamMount,
+		'streamMountLinkMode' => $streamMountLinkMode,
+		'streamMountFollowName' => $streamMountFollowName,
+		'streamMountFollowDevice' => $streamMountFollowDevice,
 		'streamUsername' => $streamUsername,
 		'streamPassword' => $streamPassword,
 		'outputDir' => $outputDir,
@@ -2023,6 +3021,34 @@ function rms_cast_recorder_supports_stdout_padding(): bool
 	return $supports;
 }
 
+function rms_cast_recorder_supports_stdout_pad_delay(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('rms-cast-recorder')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--stdout-pad-delay') !== false;
+	return $supports;
+}
+
+function get_rms_stdout_pad_delay_ms(): int
+{
+	global $RMS_STDOUT_PAD_DELAY_MS;
+	return max(0, min(5000, (int)$RMS_STDOUT_PAD_DELAY_MS));
+}
+
 function rms_cast_recorder_supports_ctcss(): bool
 {
 	static $supports = null;
@@ -2045,7 +3071,7 @@ function rms_cast_recorder_supports_ctcss(): bool
 	return $supports;
 }
 
-function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = ''): string
+function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0): string
 {
 	$conditionerCommand = array(
 		'rms-cast-recorder',
@@ -2088,6 +3114,11 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		'--stdout-pad'
 	);
 
+	if ($stdoutPadDelayMs > 0 && rms_cast_recorder_supports_stdout_pad_delay()) {
+		$conditionerCommand[] = '--stdout-pad-delay';
+		$conditionerCommand[] = (string)$stdoutPadDelayMs;
+	}
+
 	return command_from_parts($conditionerCommand);
 }
 
@@ -2096,21 +3127,12 @@ function build_stream_input_conditioner_command(array $config): string
 	$sampleRate = max(1, (int)$config['rtlBandwidth']);
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
 	$ctcssTone = trim((string)($config['ctcss'] ?? ''));
+	$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
 
 	// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
 	// Threshold/silence values keep the gate effectively open while stdout pad
 	// smooths upstream rtl_fm stalls.
-	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone);
-}
-
-function build_recorder_input_conditioner_command(array $config): string
-{
-	$sampleRate = max(1, (int)$config['rtlBandwidth']);
-
-	// Recorder mode still needs a continuous PCM stream so silence can elapse when
-	// rtl_fm stops writing under squelch. Use recorder-native stdout pad to keep
-	// silence timing inside the recorder toolchain.
-	return build_rms_stdout_pad_conditioner_command($sampleRate);
+	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs);
 }
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
@@ -2156,6 +3178,8 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 	}
 
 	if ($enableStdout) {
+		$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
+
 		array_push(
 			$recorderCommand,
 			'--stdout',
@@ -2168,6 +3192,11 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 			'16',
 			'--stdout-pad'
 		);
+
+		if ($stdoutPadDelayMs > 0 && rms_cast_recorder_supports_stdout_pad_delay()) {
+			$recorderCommand[] = '--stdout-pad-delay';
+			$recorderCommand[] = (string)$stdoutPadDelayMs;
+		}
 	}
 
 	return command_from_parts($recorderCommand);
@@ -2196,11 +3225,27 @@ function build_output_display_name(array $config): string
 	return $name . ' - ' . $description;
 }
 
-function build_stream_command(array $config): string
+function get_stream_ffmpeg_settings(): array
 {
-	$streamFormat = strtolower((string)$config['streamFormat']) === 'ogg' ? 'ogg' : 'mp3';
-	$codec = $streamFormat === 'ogg' ? 'libvorbis' : 'libmp3lame';
-	$contentType = $streamFormat === 'ogg' ? 'audio/ogg' : 'audio/mpeg';
+	global $STREAM_FFMPEG_RETRY_ENABLED;
+	global $STREAM_FFMPEG_RETRY_DELAY_SECONDS;
+	global $STREAM_FFMPEG_RETRY_MAX_ATTEMPTS;
+	global $STREAM_FFMPEG_TCP_TIMEOUT_US;
+	global $STREAM_FFMPEG_HTTP_MULTIPLE_REQUESTS;
+	global $STREAM_FFMPEG_TCP_NODELAY;
+
+	return array(
+		'retryEnabled' => parse_boolean_flag($STREAM_FFMPEG_RETRY_ENABLED, true),
+		'retryDelaySeconds' => max(1, min(30, (int)$STREAM_FFMPEG_RETRY_DELAY_SECONDS)),
+		'retryMaxAttempts' => max(0, (int)$STREAM_FFMPEG_RETRY_MAX_ATTEMPTS),
+		'tcpTimeoutUs' => max(1000000, (int)$STREAM_FFMPEG_TCP_TIMEOUT_US),
+		'httpMultipleRequests' => parse_boolean_flag($STREAM_FFMPEG_HTTP_MULTIPLE_REQUESTS, true),
+		'tcpNodelay' => parse_boolean_flag($STREAM_FFMPEG_TCP_NODELAY, true),
+	);
+}
+
+function build_stream_output_url(array $config, array $streamFfmpegSettings): string
+{
 	$mount = ltrim((string)$config['streamMount'], '/');
 	$target = (string)$config['streamTarget'];
 	$streamUsername = (string)($config['streamUsername'] ?? '');
@@ -2209,10 +3254,68 @@ function build_stream_command(array $config): string
 	if ($streamUsername !== '' && $streamPassword !== '') {
 		$authPrefix = rawurlencode($streamUsername) . ':' . rawurlencode($streamPassword) . '@';
 	}
+
+	$baseUrl = 'icecast://' . $authPrefix . $target . '/' . $mount;
+	$protocolOptions = array(
+		'timeout' => (string)max(1000000, (int)($streamFfmpegSettings['tcpTimeoutUs'] ?? 15000000)),
+		'multiple_requests' => parse_boolean_flag($streamFfmpegSettings['httpMultipleRequests'] ?? true, true) ? '1' : '0',
+		'tcp_nodelay' => parse_boolean_flag($streamFfmpegSettings['tcpNodelay'] ?? true, true) ? '1' : '0',
+	);
+
+	$queryString = http_build_query($protocolOptions, '', '&', PHP_QUERY_RFC3986);
+	if (!is_string($queryString) || $queryString === '') {
+		return $baseUrl;
+	}
+
+	return $baseUrl . '?' . $queryString;
+}
+
+function wrap_ffmpeg_stream_command_for_retry(string $ffmpegCommand, array $streamFfmpegSettings): string
+{
+	$retryEnabled = parse_boolean_flag($streamFfmpegSettings['retryEnabled'] ?? true, true);
+	if (!$retryEnabled) {
+		return $ffmpegCommand;
+	}
+
+	$retryDelaySeconds = max(1, min(30, (int)($streamFfmpegSettings['retryDelaySeconds'] ?? 2)));
+	$retryMaxAttempts = max(0, (int)($streamFfmpegSettings['retryMaxAttempts'] ?? 5));
+
+	$scriptLines = array(
+		'attempt=0',
+		'while :; do',
+		'  attempt=$((attempt + 1))',
+		'  ' . $ffmpegCommand,
+		'  ffmpeg_status=$?',
+		'  if [ "$ffmpeg_status" -eq 0 ]; then',
+		'    exit 0',
+		'  fi',
+	);
+
+	if ($retryMaxAttempts > 0) {
+		$scriptLines[] = '  if [ "$attempt" -ge ' . $retryMaxAttempts . ' ]; then';
+		$scriptLines[] = '    echo "[STREAM_RECONNECT] ffmpeg disconnected (exit $ffmpeg_status), reached max retry attempts (' . $retryMaxAttempts . '), giving up." >&2';
+		$scriptLines[] = '    exit "$ffmpeg_status"';
+		$scriptLines[] = '  fi';
+	}
+
+	$scriptLines[] = '  echo "[STREAM_RECONNECT] ffmpeg disconnected (exit $ffmpeg_status), retrying in ' . $retryDelaySeconds . 's (attempt $attempt)." >&2';
+	$scriptLines[] = '  sleep ' . $retryDelaySeconds;
+	$scriptLines[] = 'done';
+
+	return 'sh -c ' . escapeshellarg(implode("\n", $scriptLines));
+}
+
+function build_stream_command(array $config): string
+{
+	$streamFfmpegSettings = get_stream_ffmpeg_settings();
+	$streamFormat = strtolower((string)$config['streamFormat']) === 'ogg' ? 'ogg' : 'mp3';
+	$codec = $streamFormat === 'ogg' ? 'libvorbis' : 'libmp3lame';
+	$contentType = $streamFormat === 'ogg' ? 'audio/ogg' : 'audio/mpeg';
 	$description = build_signal_description($config);
 	$displayName = build_output_display_name($config);
 	$streamBitrate = max(16, min(320, (int)$config['streamBitrate']));
 	$vorbisQuality = max(0, min(10, (int)round(($streamBitrate - 32) / 32)));
+	$streamOutputUrl = build_stream_output_url($config, $streamFfmpegSettings);
 
 	$ffmpegCommand = array(
 		'ffmpeg',
@@ -2239,7 +3342,7 @@ function build_stream_command(array $config): string
 		$description,
 		'-f',
 		$streamFormat,
-		'icecast://' . $authPrefix . $target . '/' . $mount,
+		$streamOutputUrl,
 	);
 
 	if ($streamFormat === 'ogg') {
@@ -2254,7 +3357,8 @@ function build_stream_command(array $config): string
 		));
 	}
 
-	return command_from_parts($ffmpegCommand);
+	$ffmpegCommandString = command_from_parts($ffmpegCommand);
+	return wrap_ffmpeg_stream_command_for_retry($ffmpegCommandString, $streamFfmpegSettings);
 }
 
 function sanitize_device_id_for_filename(string $deviceId): string
@@ -2511,23 +3615,40 @@ function build_pipeline_command(array $config): string
 		return $pipeline;
 	}
 
-	$pipeline .= ' | ' . build_recorder_input_conditioner_command($config);
 	$pipeline .= ' | ' . build_recording_recorder_command($config, false);
 	return $pipeline;
 }
 
-function stop_instance_by_pid(int $pid): void
+function stop_instance_by_pid(int $pid, int $processGroupId = 0): void
 {
-	if ($pid <= 0) {
+	$pid = max(0, $pid);
+	$processGroupId = max(0, $processGroupId);
+	if ($processGroupId <= 0 && $pid > 0) {
+		$processGroupId = $pid;
+	}
+
+	if ($pid <= 0 && $processGroupId <= 0) {
 		return;
 	}
 
-	$termCommand = 'kill -TERM -- -' . $pid . ' >/dev/null 2>&1 || kill -TERM ' . $pid . ' >/dev/null 2>&1';
+	$termCommand = 'true';
+	if ($processGroupId > 0) {
+		$termCommand = 'kill -TERM -- -' . $processGroupId . ' >/dev/null 2>&1 || true';
+	}
+	if ($pid > 0) {
+		$termCommand .= '; kill -TERM ' . $pid . ' >/dev/null 2>&1 || true';
+	}
 	shell_exec('bash -lc ' . escapeshellarg($termCommand));
 	usleep(250000);
 
-	if (is_process_running($pid)) {
-		$killCommand = 'kill -KILL -- -' . $pid . ' >/dev/null 2>&1 || kill -KILL ' . $pid . ' >/dev/null 2>&1';
+	if (($processGroupId > 0 && is_process_group_running($processGroupId)) || ($pid > 0 && is_process_running($pid))) {
+		$killCommand = 'true';
+		if ($processGroupId > 0) {
+			$killCommand = 'kill -KILL -- -' . $processGroupId . ' >/dev/null 2>&1 || true';
+		}
+		if ($pid > 0) {
+			$killCommand .= '; kill -KILL ' . $pid . ' >/dev/null 2>&1 || true';
+		}
 		shell_exec('bash -lc ' . escapeshellarg($killCommand));
 		usleep(500000);
 	}
@@ -2572,12 +3693,8 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		return array('ok' => false, 'error' => 'CTCSS is configured but this rms-cast-recorder build does not support --ctcss.');
 	}
 
-	if (!$recorderSupportsStdoutPad) {
-		if ($streamEnabled) {
-			return array('ok' => false, 'error' => 'Stream output requires rms-cast-recorder support for --stdout-raw and --stdout-pad. Upgrade rms-cast-recorder and retry.');
-		}
-
-		return array('ok' => false, 'error' => 'Record output requires rms-cast-recorder support for --stdout-raw and --stdout-pad so silence detection can stay inside rms-cast-recorder. Upgrade rms-cast-recorder and retry.');
+	if ($streamEnabled && !$recorderSupportsStdoutPad) {
+		return array('ok' => false, 'error' => 'Stream output requires rms-cast-recorder support for --stdout-raw and --stdout-pad. Upgrade rms-cast-recorder and retry.');
 	}
 
 	if ($uploadModeEnabled && !command_exists('curl')) {
@@ -2616,11 +3733,17 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 	$attemptDelays = $normalizedAttemptDelays;
 	$lastError = 'Failed to launch pipeline process.';
 	$pid = 0;
+	$processGroupId = 0;
 
 	for ($attempt = 0; $attempt < count($attemptDelays); $attempt++) {
 		$runtimeDeviceIndex = (string)($config['deviceIndex'] ?? $config['device']);
 		force_release_device($runtimeDeviceIndex);
-		$pid = launch_pipeline_process($pipelineCommand, $logPath);
+		$launchTracking = launch_pipeline_process($pipelineCommand, $logPath);
+		$pid = (int)($launchTracking['pid'] ?? 0);
+		$processGroupId = max(0, (int)($launchTracking['pgid'] ?? 0));
+		if ($processGroupId <= 0 && $pid > 0) {
+			$processGroupId = $pid;
+		}
 
 		if ($pid <= 0) {
 			$lastError = 'Failed to launch pipeline process.';
@@ -2629,8 +3752,15 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		}
 
 		usleep(900000);
-		if (is_process_running($pid)) {
-			return array('ok' => true, 'pid' => $pid, 'logFile' => $logFileName, 'command' => $pipelineCommandForLog, 'config' => $config);
+		if (($processGroupId > 0 && is_process_group_running($processGroupId)) || is_process_running($pid)) {
+			return array(
+				'ok' => true,
+				'pid' => $pid,
+				'pgid' => $processGroupId,
+				'logFile' => $logFileName,
+				'command' => $pipelineCommandForLog,
+				'config' => $config,
+			);
 		}
 
 		$excerpt = read_log_excerpt($logPath);
@@ -2650,7 +3780,8 @@ function list_instances(array $state): array
 	$instances = array();
 	foreach ($state as $device => $instance) {
 		$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
-		$running = is_process_running($pid);
+		$processGroupId = get_instance_process_group_id((array)$instance);
+		$running = is_instance_running((array)$instance);
 		if (!$running) {
 			continue;
 		}
@@ -2673,6 +3804,7 @@ function list_instances(array $state): array
 		$instances[] = array(
 			'device' => $instanceDeviceId,
 			'pid' => $pid,
+			'pgid' => $processGroupId,
 			'running' => true,
 			'startedAt' => isset($instance['startedAt']) ? (int)$instance['startedAt'] : 0,
 			'logFile' => isset($instance['logFile']) ? (string)$instance['logFile'] : '',
@@ -2688,11 +3820,167 @@ function list_instances(array $state): array
 	return $instances;
 }
 
-function parse_rtl_test_scan_output(string $scanOutput): array
+function get_device_scan_settings(): array
 {
-	$devices = array();
+	global $DEVICE_SCAN_MIN_INTERVAL_SECONDS;
+	global $DEVICE_SCAN_CACHE_FILE;
+
+	$cacheFile = trim((string)$DEVICE_SCAN_CACHE_FILE);
+	if ($cacheFile === '') {
+		$cacheFile = __DIR__ . '/rtl_sdr_device_scan_cache.json';
+	}
+
+	return array(
+		'minIntervalSeconds' => max(10, (int)$DEVICE_SCAN_MIN_INTERVAL_SECONDS),
+		'cacheFile' => $cacheFile,
+	);
+}
+
+function merge_discovered_devices_by_index(array &$devicesByIndex, array $devices): void
+{
+	foreach ($devices as $device) {
+		if (!is_array($device)) {
+			continue;
+		}
+
+		$index = normalize_device_index((string)($device['index'] ?? ''));
+		if ($index === '') {
+			continue;
+		}
+
+		$fallbackLabel = 'RTL-SDR Device ' . $index;
+		$current = isset($devicesByIndex[$index]) && is_array($devicesByIndex[$index])
+			? $devicesByIndex[$index]
+			: array(
+				'id' => build_device_id_from_index_and_serial($index, ''),
+				'index' => $index,
+				'label' => $fallbackLabel,
+				'serial' => '',
+			);
+
+		$currentLabel = sanitize_device_label((string)($current['label'] ?? ''), $fallbackLabel);
+		$incomingLabel = trim((string)($device['label'] ?? ''));
+		$label = $incomingLabel === ''
+			? $currentLabel
+			: sanitize_device_label($incomingLabel, $currentLabel);
+
+		$currentSerial = normalize_device_serial((string)($current['serial'] ?? ''));
+		$incomingSerial = normalize_device_serial((string)($device['serial'] ?? extract_device_serial($incomingLabel)));
+		$serial = $incomingSerial !== '' ? $incomingSerial : $currentSerial;
+
+		$devicesByIndex[$index] = array(
+			'id' => build_device_id_from_index_and_serial($index, $serial),
+			'index' => $index,
+			'label' => $label,
+			'serial' => $serial,
+		);
+	}
+}
+
+function read_device_scan_cache(string $cacheFile): array
+{
+	$empty = array(
+		'scannedAt' => 0,
+		'devices' => array(),
+		'warning' => '',
+	);
+
+	if ($cacheFile === '' || !file_exists($cacheFile)) {
+		return $empty;
+	}
+
+	$raw = @file_get_contents($cacheFile);
+	if (!is_string($raw) || trim($raw) === '') {
+		return $empty;
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return $empty;
+	}
+
+	$devicesRaw = isset($decoded['devices']) && is_array($decoded['devices'])
+		? $decoded['devices']
+		: array();
+	$devicesByIndex = array();
+	merge_discovered_devices_by_index($devicesByIndex, $devicesRaw);
+	ksort($devicesByIndex, SORT_NATURAL);
+
+	return array(
+		'scannedAt' => max(0, (int)($decoded['scannedAt'] ?? 0)),
+		'devices' => array_values($devicesByIndex),
+		'warning' => trim((string)($decoded['warning'] ?? '')),
+	);
+}
+
+function write_device_scan_cache(string $cacheFile, int $scannedAt, array $devices, string $warning): void
+{
+	if ($cacheFile === '') {
+		return;
+	}
+
+	$cacheDir = dirname($cacheFile);
+	if ($cacheDir !== '' && $cacheDir !== '.' && !is_dir($cacheDir)) {
+		@mkdir($cacheDir, 0775, true);
+	}
+
+	$devicesByIndex = array();
+	merge_discovered_devices_by_index($devicesByIndex, $devices);
+	ksort($devicesByIndex, SORT_NATURAL);
+
+	$payload = array(
+		'scannedAt' => max(0, $scannedAt),
+		'devices' => array_values($devicesByIndex),
+		'warning' => trim($warning),
+	);
+
+	$encoded = json_encode($payload, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return;
+	}
+
+	@file_put_contents($cacheFile, $encoded . "\n", LOCK_EX);
+}
+
+function execute_device_scan_command(string $baseCommand): string
+{
+	$commands = array();
+	$wrappedCommand = wrap_for_device_access($baseCommand);
+	if ($wrappedCommand !== '') {
+		$commands[] = $wrappedCommand;
+	}
+	if ($wrappedCommand !== $baseCommand) {
+		$commands[] = $baseCommand;
+	}
+
+	$fallbackOutput = '';
+
+	foreach ($commands as $command) {
+		$output = shell_exec('bash -lc ' . escapeshellarg($command));
+		if (!is_string($output) || trim($output) === '') {
+			continue;
+		}
+
+		if ($fallbackOutput === '') {
+			$fallbackOutput = $output;
+		}
+
+		if (
+			preg_match('/Found\s+[0-9]+\s+device\(s\)/i', $output) === 1
+			|| preg_match('/^Using device\s+[0-9]+\s*:/mi', $output) === 1
+		) {
+			return $output;
+		}
+	}
+
+	return $fallbackOutput;
+}
+
+function parse_rtl_fm_scan_output(string $scanOutput): array
+{
 	$expectedCount = null;
-	$seenDeviceIds = array();
+	$parsedDevices = array();
+	$listedIndexes = array();
 
 	$lines = preg_split('/\r\n|\r|\n/', $scanOutput);
 	if (!is_array($lines)) {
@@ -2702,116 +3990,116 @@ function parse_rtl_test_scan_output(string $scanOutput): array
 	foreach ($lines as $line) {
 		$trimmed = trim((string)$line);
 		if ($trimmed === '') {
-			if (count($devices) > 0) {
-				break;
-			}
 			continue;
 		}
 
-		if (preg_match('/^Found\s+([0-9]+)\s+device\(s\)(?::|\.|$)/i', $trimmed, $matches)) {
+		if (preg_match('/^Found\s+([0-9]+)\s+device\(s\)(?::|\.|$)/i', $trimmed, $matches) === 1) {
 			$expectedCount = (int)$matches[1];
 			continue;
 		}
 
-		if ($expectedCount !== null && preg_match('/^Using device\s+/i', $trimmed)) {
-			break;
-		}
-
 		$index = '';
 		$label = '';
-		if (preg_match('/^([0-9]+):\s*(.+)$/', $trimmed, $matches)) {
-			$index = (string)((int)$matches[1]);
+		if (preg_match('/^([0-9]+):\s*(.+)$/', $trimmed, $matches) === 1) {
+			$index = normalize_device_index((string)$matches[1]);
 			$label = trim((string)$matches[2]);
-		} elseif (preg_match('/^\[\s*([0-9]+)\s*\]\s*(.+)$/', $trimmed, $matches)) {
-			$index = (string)((int)$matches[1]);
+		} elseif (preg_match('/^\[\s*([0-9]+)\s*\]\s*(.+)$/', $trimmed, $matches) === 1) {
+			$index = normalize_device_index((string)$matches[1]);
 			$label = trim((string)$matches[2]);
-		} elseif (preg_match('/^Device\s+([0-9]+)\s*:\s*(.+)$/i', $trimmed, $matches)) {
-			$index = (string)((int)$matches[1]);
+		} elseif (preg_match('/^Device\s+([0-9]+)\s*:\s*(.+)$/i', $trimmed, $matches) === 1) {
+			$index = normalize_device_index((string)$matches[1]);
+			$label = trim((string)$matches[2]);
+		} elseif (preg_match('/^Using device\s+([0-9]+)\s*:\s*(.+)$/i', $trimmed, $matches) === 1) {
+			$index = normalize_device_index((string)$matches[1]);
 			$label = trim((string)$matches[2]);
 		}
 
-		if ($index === '') {
+		if ($index !== '') {
+			if (preg_match('/^Using device\s+/i', $trimmed) === 1 && isset($listedIndexes[$index])) {
+				continue;
+			}
+
+			$parsedDevices[] = array(
+				'index' => $index,
+				'label' => sanitize_device_label($label, 'RTL-SDR Device ' . $index),
+				'serial' => extract_device_serial($label),
+			);
+
+			if (preg_match('/^Using device\s+/i', $trimmed) !== 1) {
+				$listedIndexes[$index] = true;
+			}
 			continue;
 		}
-
-		$serial = extract_device_serial($label);
-		$deviceId = build_device_id_from_index_and_serial($index, $serial);
-		if ($deviceId === '' || isset($seenDeviceIds[$deviceId])) {
-			continue;
-		}
-
-		$seenDeviceIds[$deviceId] = true;
-		$devices[] = array(
-			'id' => $deviceId,
-			'index' => $index,
-			'label' => sanitize_device_label($label, 'RTL-SDR Device ' . $index),
-			'serial' => $serial,
-		);
 	}
 
+	$devicesByIndex = array();
+	merge_discovered_devices_by_index($devicesByIndex, $parsedDevices);
+	ksort($devicesByIndex, SORT_NATURAL);
+
 	return array(
-		'devices' => $devices,
+		'devices' => array_values($devicesByIndex),
 		'expectedCount' => $expectedCount,
 	);
 }
 
 function discover_rtl_devices(): array
 {
-	$devices = array();
-	$warning = '';
+	$settings = get_device_scan_settings();
+	$cacheFile = (string)($settings['cacheFile'] ?? '');
+	$minIntervalSeconds = max(10, (int)($settings['minIntervalSeconds'] ?? 60));
+	$now = time();
 
-	if (!command_exists('rtl_test')) {
-		$warning = 'rtl_test was not found in PATH, so hardware auto-discovery is unavailable.';
-		return array('devices' => $devices, 'warning' => $warning);
+	$cache = read_device_scan_cache($cacheFile);
+	$cachedAt = max(0, (int)($cache['scannedAt'] ?? 0));
+	if ($cachedAt > 0 && ($now - $cachedAt) < $minIntervalSeconds) {
+		return array(
+			'devices' => isset($cache['devices']) && is_array($cache['devices']) ? $cache['devices'] : array(),
+			'warning' => (string)($cache['warning'] ?? ''),
+		);
+	}
+
+	$cachedDevices = isset($cache['devices']) && is_array($cache['devices']) ? $cache['devices'] : array();
+
+	if (!command_exists('rtl_fm')) {
+		$warning = 'rtl_fm was not found in PATH, so hardware auto-discovery is unavailable.';
+		write_device_scan_cache($cacheFile, $now, $cachedDevices, $warning);
+		return array('devices' => $cachedDevices, 'warning' => $warning);
 	}
 
 	$baseScanCommand = command_exists('timeout')
-		? 'LC_ALL=C timeout 8 rtl_test -t 2>&1'
-		: 'LC_ALL=C rtl_test -t 2>&1';
+		? 'LC_ALL=C timeout 10 rtl_fm -d 0 2>&1'
+		: 'LC_ALL=C rtl_fm -d 0 2>&1';
 
-	$scanCommands = array();
-	$wrappedScanCommand = wrap_for_device_access($baseScanCommand);
-	if ($wrappedScanCommand !== '') {
-		$scanCommands[] = $wrappedScanCommand;
-	}
-	if ($wrappedScanCommand !== $baseScanCommand) {
-		$scanCommands[] = $baseScanCommand;
-	}
-
-	$scanOutput = '';
-	$parsed = array('devices' => array(), 'expectedCount' => null);
-	foreach ($scanCommands as $scanCommand) {
-		$candidateOutput = shell_exec('bash -lc ' . escapeshellarg($scanCommand));
-		if (!is_string($candidateOutput) || trim($candidateOutput) === '') {
-			continue;
-		}
-
-		$scanOutput = $candidateOutput;
-		$parsed = parse_rtl_test_scan_output($candidateOutput);
-		if (count($parsed['devices']) > 0) {
-			break;
-		}
-	}
-
+	$scanOutput = execute_device_scan_command($baseScanCommand);
 	if ($scanOutput === '') {
-		$warning = 'rtl_test returned no output.';
-		return array('devices' => $devices, 'warning' => $warning);
+		$warning = 'rtl_fm returned no output.';
+		write_device_scan_cache($cacheFile, $now, $cachedDevices, $warning);
+		return array('devices' => $cachedDevices, 'warning' => $warning);
 	}
 
-	$devices = isset($parsed['devices']) && is_array($parsed['devices']) ? $parsed['devices'] : array();
-	$expectedCount = isset($parsed['expectedCount']) ? (int)$parsed['expectedCount'] : null;
+	$parsed = parse_rtl_fm_scan_output($scanOutput);
+	$devicesByIndex = array();
+	$parsedDevices = isset($parsed['devices']) && is_array($parsed['devices']) ? $parsed['devices'] : array();
+	merge_discovered_devices_by_index($devicesByIndex, $parsedDevices);
 
-	if (count($devices) === 0 && $expectedCount !== null && $expectedCount > 0) {
+	$expectedCount = isset($parsed['expectedCount']) ? (int)$parsed['expectedCount'] : null;
+	if ($expectedCount !== null && $expectedCount > 0) {
 		for ($index = 0; $index < $expectedCount; $index++) {
 			$normalizedIndex = (string)$index;
-			$devices[] = array(
-				'id' => build_device_id_from_index_and_serial($normalizedIndex, ''),
-				'index' => $normalizedIndex,
-				'label' => 'RTL-SDR Device ' . $normalizedIndex,
-				'serial' => '',
-			);
+			if (!isset($devicesByIndex[$normalizedIndex])) {
+				$devicesByIndex[$normalizedIndex] = array(
+					'id' => build_device_id_from_index_and_serial($normalizedIndex, ''),
+					'index' => $normalizedIndex,
+					'label' => 'RTL-SDR Device ' . $normalizedIndex,
+					'serial' => '',
+				);
+			}
 		}
 	}
+
+	ksort($devicesByIndex, SORT_NATURAL);
+	$devices = array_values($devicesByIndex);
+	$warning = '';
 
 	if (count($devices) === 0) {
 		if (stripos($scanOutput, 'No supported devices found') !== false) {
@@ -2847,6 +4135,7 @@ function discover_rtl_devices(): array
 		}
 	}
 
+	write_device_scan_cache($cacheFile, $now, $devices, $warning);
 	return array('devices' => $devices, 'warning' => $warning);
 }
 
@@ -3173,10 +4462,41 @@ if (isset($_REQUEST['action'])) {
 	$action = trim((string)$jsonPayload['action']);
 }
 
+$requestSource = '';
+if (isset($_REQUEST['source'])) {
+	$requestSource = trim((string)$_REQUEST['source']);
+} elseif (isset($jsonPayload['source'])) {
+	$requestSource = trim((string)$jsonPayload['source']);
+}
+
 if ($action !== '') {
+	$stateLockHandle = acquire_runtime_state_lock($STATE_FILE);
+	if ($stateLockHandle === null) {
+		send_json(array('ok' => false, 'error' => 'Failed to lock runtime state.'), 500);
+	}
+	register_shutdown_function(static function () use ($stateLockHandle): void {
+		release_runtime_state_lock($stateLockHandle);
+	});
+
 	$state = load_state($STATE_FILE);
 	$desiredState = load_desired_state($DESIRED_STATE_FILE);
 	$desiredStateChanged = false;
+	$shouldReconcileRuntimeState = count($state) === 0;
+	if (!$shouldReconcileRuntimeState) {
+		foreach ($desiredState as $desiredDeviceId => $entry) {
+			if (!device_is_desired_running($desiredState, (string)$desiredDeviceId, true)) {
+				continue;
+			}
+			if (find_state_device_key($state, (string)$desiredDeviceId) === '') {
+				$shouldReconcileRuntimeState = true;
+				break;
+			}
+		}
+	}
+	if ($shouldReconcileRuntimeState && reconcile_runtime_state_with_live_process_groups($state, $LOG_DIR, $UI_SETTINGS_FILE)) {
+		save_state($STATE_FILE, $state);
+		sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
+	}
 
 	if ($action === 'stop') {
 		$preStopDeviceId = normalize_device_id($_POST['device'] ?? $_GET['device'] ?? ($jsonPayload['device'] ?? ''));
@@ -3342,14 +4662,46 @@ if ($action !== '') {
 	}
 
 	if ($action === 'list') {
+		$queueSnapshot = get_action_queue_snapshot();
+		$queueResult = array(
+			'processed' => 0,
+			'pending' => 0,
+			'busy' => false,
+			'stateChanged' => false,
+			'desiredStateChanged' => false,
+		);
+		$queueWorkerEnabled = is_watchdog_queue_worker_request($requestSource);
+		if ($queueWorkerEnabled) {
+			$queueResult = process_queued_stream_actions($state, $desiredState, $LOG_DIR, $recordingsRoot);
+			if ((bool)($queueResult['desiredStateChanged'] ?? false)) {
+				save_desired_state($DESIRED_STATE_FILE, $desiredState);
+			}
+			$queueSnapshot = get_action_queue_snapshot();
+		}
+
 		cleanup_stale_logs_by_device($LOG_DIR);
 		save_state($STATE_FILE, $state);
 		$settings = sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
-		send_json(array(
+		$response = array(
 			'ok' => true,
 			'instances' => list_instances($state),
 			'settings' => ui_settings_for_response($settings),
-		));
+		);
+		$response['queue'] = array(
+			'processed' => $queueWorkerEnabled ? (int)($queueResult['processed'] ?? 0) : 0,
+			'pending' => (int)($queueSnapshot['pending'] ?? 0),
+			'busy' => $queueWorkerEnabled ? (bool)($queueResult['busy'] ?? false) : false,
+			'worker' => $queueWorkerEnabled,
+			'lastProcessedAt' => (int)($queueSnapshot['lastProcessedAt'] ?? 0),
+			'lastResult' => isset($queueSnapshot['lastResult']) && is_array($queueSnapshot['lastResult'])
+				? $queueSnapshot['lastResult']
+				: array(),
+			'results' => $queueWorkerEnabled && isset($queueResult['results']) && is_array($queueResult['results'])
+				? $queueResult['results']
+				: array(),
+		);
+
+		send_json($response);
 	}
 
 	if ($action === 'stop') {
@@ -3381,7 +4733,8 @@ if ($action !== '') {
 		}
 
 		$pid = isset($state[$stateDeviceKey]['pid']) ? (int)$state[$stateDeviceKey]['pid'] : 0;
-		stop_instance_by_pid($pid);
+		$processGroupId = get_instance_process_group_id((array)$state[$stateDeviceKey]);
+		stop_instance_by_pid($pid, $processGroupId);
 		unset($state[$stateDeviceKey]);
 		save_state($STATE_FILE, $state);
 		send_json(array('ok' => true, 'message' => 'Stopped device ' . $resolvedDeviceId . '.', 'instances' => list_instances($state)));
@@ -3390,7 +4743,8 @@ if ($action !== '') {
 	if ($action === 'stop_all') {
 		foreach ($state as $instance) {
 			$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
-			stop_instance_by_pid($pid);
+			$processGroupId = get_instance_process_group_id((array)$instance);
+			stop_instance_by_pid($pid, $processGroupId);
 		}
 
 		$state = array();
@@ -3492,11 +4846,33 @@ if ($action !== '') {
 			send_json(array('ok' => false, 'error' => $error->getMessage()), 400);
 		}
 
+		if ($action === 'retune') {
+			$queueDeviceId = normalize_device_id((string)($config['device'] ?? ''));
+			$enqueued = enqueue_stream_action_request('retune', $config);
+			if (($enqueued['ok'] ?? false) !== true) {
+				send_json(array('ok' => false, 'error' => (string)($enqueued['error'] ?? 'Failed to queue retune action.')), 500);
+			}
+
+			if ($queueDeviceId !== '' && set_device_desired_running($desiredState, $queueDeviceId, true)) {
+				save_desired_state($DESIRED_STATE_FILE, $desiredState);
+			}
+
+			send_json(array(
+				'ok' => true,
+				'queued' => true,
+				'queueId' => (string)($enqueued['id'] ?? ''),
+				'queuePosition' => (int)($enqueued['position'] ?? 0),
+				'message' => 'RETUNE queued for device ' . $queueDeviceId . '. It will be applied on the next watchdog tick.',
+				'instances' => list_instances($state),
+			));
+		}
+
 		$deviceId = (string)$config['device'];
 		$existingStateKey = find_state_device_key($state, $deviceId);
 		if ($existingStateKey !== '') {
 			$existingPid = isset($state[$existingStateKey]['pid']) ? (int)$state[$existingStateKey]['pid'] : 0;
-			stop_instance_by_pid($existingPid);
+			$existingProcessGroupId = get_instance_process_group_id((array)$state[$existingStateKey]);
+			stop_instance_by_pid($existingPid, $existingProcessGroupId);
 			unset($state[$existingStateKey]);
 		}
 
@@ -3586,6 +4962,12 @@ if ($action !== '') {
 		}
 		.hero h2 { margin: 0; font-size: 30px; letter-spacing: 0.04em; text-transform: uppercase; }
 		.hero p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+		.hero-right {
+			display: inline-flex;
+			flex-direction: column;
+			gap: 8px;
+			align-items: flex-end;
+		}
 		.summary-chip {
 			display: inline-flex;
 			align-items: center;
@@ -3596,6 +4978,35 @@ if ($action !== '') {
 			border: 1px solid rgba(217, 164, 65, 0.24);
 			font-size: 12px;
 		}
+		.queue-chip {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 8px 12px;
+			border-radius: 999px;
+			background: rgba(255,255,255,0.03);
+			border: 1px solid var(--border);
+			font-size: 11px;
+			color: var(--muted);
+			max-width: 420px;
+		}
+		.queue-chip-label {
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			font-size: 10px;
+			color: var(--muted);
+			flex: 0 0 auto;
+		}
+		#queueStatusText {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+			max-width: 300px;
+		}
+		.queue-chip.pending { color: #ffd783; border-color: rgba(217, 164, 65, 0.5); background: rgba(217, 164, 65, 0.16); }
+		.queue-chip.success { color: #b7f09a; border-color: rgba(135, 211, 124, 0.48); background: rgba(135, 211, 124, 0.16); }
+		.queue-chip.error { color: #ffb3b3; border-color: rgba(241, 143, 143, 0.45); background: rgba(241, 143, 143, 0.14); }
+		.queue-chip.busy { color: #8df7d4; border-color: rgba(99, 215, 176, 0.5); background: rgba(99, 215, 176, 0.16); }
 		.panel {
 			border: 1px solid var(--border);
 			border-radius: 16px;
@@ -3638,7 +5049,9 @@ if ($action !== '') {
 		.refresh-button:disabled:hover { transform: none; border-color: var(--border); }
 		.refresh-button.primary { background: var(--accent); color: #17120a; border-color: var(--accent); font-weight: 700; }
 		.refresh-button.danger { border-color: rgba(241, 143, 143, 0.45); }
-		.template-toolbar-group { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+		.template-modal-content { max-width: 960px; }
+		.template-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+		.template-modal-actions .refresh-button { flex: 1 1 220px; }
 		#templateDeviceSelect { min-width: 210px; }
 		.device-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
 		.device-card { padding: 16px; position: relative; overflow: hidden; }
@@ -3695,8 +5108,13 @@ if ($action !== '') {
 		.meta-box { display: flex; flex-direction: column; justify-content: flex-start; min-height: 50px; padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); }
 		.meta-box.full { grid-column: span 3; min-height: auto; }
 		.meta-label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+		.meta-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+		.meta-label-row .meta-label { margin-bottom: 0; }
+		.meta-label-row .refresh-button.compact { padding: 4px 8px; font-size: 10px; letter-spacing: 0.06em; }
 		.meta-value { font-size: 12px; word-break: break-word; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.meta-box.full .meta-value { overflow: visible; text-overflow: clip; white-space: normal; }
+		.meta-value.pipeline-lines { display: flex; flex-direction: column; gap: 3px; font: 12px/1.4 "Cascadia Mono", "Consolas", monospace; }
+		.meta-value.pipeline-lines .pipeline-line { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.device-config { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
 		.device-config.collapsed { display: none; }
 		.device-log-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
@@ -3764,6 +5182,7 @@ if ($action !== '') {
 		@media (max-width: 760px) {
 			.page-wrap { padding: 12px; }
 			.hero { flex-direction: column; align-items: flex-start; }
+			.hero-right { align-items: flex-start; }
 			.form-row, .device-meta { grid-template-columns: 1fr; }
 			.shared-setting { flex-direction: column; align-items: stretch; }
 			.shared-setting label { min-width: 0; }
@@ -3777,24 +5196,20 @@ if ($action !== '') {
 			<h2><?=htmlspecialchars($RTL_PAGE_TITLE, ENT_QUOTES, 'UTF-8')?></h2>
 			<p>Detect radios, open a device card, tune it, and start or stop capture in one place.</p>
 		</div>
-		<div class="summary-chip"><span id="summaryText">0 devices detected</span></div>
+		<div class="hero-right">
+			<div class="summary-chip"><span id="summaryText">0 devices detected</span></div>
+			<div class="queue-chip hidden" id="queueStatusChip" title="No queued backend actions.">
+				<span class="queue-chip-label">Queue</span>
+				<span id="queueStatusText">Idle</span>
+			</div>
+		</div>
 	</div>
 
 	<div class="panel toolbar">
 		<button type="button" class="refresh-button primary" id="scanDevicesButton">Scan Devices</button>
 		<button type="button" class="refresh-button" id="refreshButton">Refresh State</button>
 		<button type="button" class="refresh-button danger" id="stopAllButton">Stop All</button>
-		<button type="button" class="refresh-button" id="toggleTemplateToolbarButton">Show Templates</button>
-		<span id="templateToolbarGroup" class="template-toolbar-group hidden">
-			<select id="globalTemplateSelect" aria-label="Global template selector"></select>
-			<select id="templateDeviceSelect" aria-label="Template target devices" multiple size="3"></select>
-			<button type="button" class="refresh-button primary" id="startTemplateSelectedButton">Start Template On Selected</button>
-			<button type="button" class="refresh-button" id="applyTemplateSelectedButton">Apply Template To Selected</button>
-			<button type="button" class="refresh-button" id="exportGlobalTemplateButton">Export Template JSON</button>
-			<button type="button" class="refresh-button" id="exportAllGlobalTemplatesButton">Export All Templates JSON</button>
-			<button type="button" class="refresh-button" id="importGlobalTemplateButton">Import Template(s) JSON</button>
-			<input type="file" id="importGlobalTemplateFileInput" accept="application/json,.json" style="display:none;">
-		</span>
+		<button type="button" class="refresh-button" id="toggleTemplateToolbarButton">Templates</button>
 		<span class="toolbar-spacer"></span>
 		<button type="button" class="refresh-button" id="themeToggleButton">Toggle Theme</button>
 		<span id="statusText" class="status-text">Ready.</span>
@@ -3881,6 +5296,35 @@ if ($action !== '') {
 			</div>
 		</div>
 	</div>
+
+	<div id="templateModal" class="modal hidden">
+		<div class="modal-content template-modal-content">
+			<div class="modal-header">
+				<h3>Templates</h3>
+				<button type="button" class="modal-close" id="templateModalClose">&times;</button>
+			</div>
+			<div class="modal-body">
+				<div class="form-row single">
+					<div><label>Template</label><select id="globalTemplateSelect" aria-label="Global template selector"></select></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Target Devices</label><select id="templateDeviceSelect" aria-label="Template target devices" multiple size="5"></select></div>
+				</div>
+				<div class="template-modal-actions">
+					<button type="button" class="refresh-button primary" id="startTemplateSelectedButton">Start Template On Selected</button>
+					<button type="button" class="refresh-button" id="applyTemplateSelectedButton">Apply Template To Selected</button>
+					<button type="button" class="refresh-button danger" id="deleteGlobalTemplateButton">Delete Template</button>
+					<button type="button" class="refresh-button" id="exportGlobalTemplateButton">Export Template JSON</button>
+					<button type="button" class="refresh-button" id="exportAllGlobalTemplatesButton">Export All Templates JSON</button>
+					<button type="button" class="refresh-button" id="importGlobalTemplateButton">Import Template(s) JSON</button>
+				</div>
+				<input type="file" id="importGlobalTemplateFileInput" accept="application/json,.json" style="display:none;">
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="refresh-button" id="templateModalCancel">Close</button>
+			</div>
+		</div>
+	</div>
 </div>
 
 <script type="text/javascript">
@@ -3895,6 +5339,16 @@ var recordingServersById = {};
 var openConfigPanelsByDevice = {};
 var openLogPanelsByDevice = {};
 var logContentByDevice = {};
+var queueStatusState = {
+	pending: 0,
+	busy: false,
+	processed: 0,
+	lastProcessedAt: 0,
+	lastResult: null
+};
+var queueStatusHideTimer = null;
+var queueStatusLastSignature = '';
+var QUEUE_STATUS_VISIBLE_MS = 20000;
 var streamPlayersByDevice = {};
 var uiSettingsSaveTimer = null;
 var uiSettingsSaveInFlight = false;
@@ -3943,20 +5397,191 @@ function setStatus(message, isError)
 	statusText.style.color = isError ? 'var(--danger)' : 'var(--muted)';
 }
 
-function setTemplateToolbarVisible(visible)
+function normalizeQueueStatusPayload(rawQueue)
 {
-	var group = document.getElementById('templateToolbarGroup');
-	var toggleButton = document.getElementById('toggleTemplateToolbarButton');
-	if (!group || !toggleButton) {
+	var queue = (rawQueue && typeof rawQueue === 'object' && !Array.isArray(rawQueue))
+		? rawQueue
+		: {};
+
+	var pending = Number(queue.pending);
+	if (!isFinite(pending) || pending < 0) {
+		pending = 0;
+	}
+	pending = Math.floor(pending);
+
+	var processed = Number(queue.processed);
+	if (!isFinite(processed) || processed < 0) {
+		processed = 0;
+	}
+	processed = Math.floor(processed);
+
+	var lastProcessedAt = Number(queue.lastProcessedAt);
+	if (!isFinite(lastProcessedAt) || lastProcessedAt < 0) {
+		lastProcessedAt = 0;
+	}
+	lastProcessedAt = Math.floor(lastProcessedAt);
+
+	var rawLastResult = (queue.lastResult && typeof queue.lastResult === 'object' && !Array.isArray(queue.lastResult))
+		? queue.lastResult
+		: null;
+	var lastResult = null;
+	if (rawLastResult) {
+		var lastAction = String(rawLastResult.action || '').trim().toLowerCase();
+		var lastDevice = normalizeClientDeviceId(String(rawLastResult.device || '').trim());
+		var lastMessage = String(rawLastResult.message || '').trim();
+		var lastOk = !!rawLastResult.ok;
+		var lastAt = Number(rawLastResult.processedAt);
+		if (!isFinite(lastAt) || lastAt < 0) {
+			lastAt = 0;
+		}
+		lastAt = Math.floor(lastAt);
+
+		if (lastAction !== '' || lastMessage !== '' || lastAt > 0 || lastDevice !== '') {
+			lastResult = {
+				action: lastAction,
+				device: lastDevice,
+				message: lastMessage,
+				ok: lastOk,
+				processedAt: lastAt
+			};
+		}
+	}
+
+	return {
+		pending: pending,
+		busy: !!queue.busy,
+		processed: processed,
+		lastProcessedAt: lastProcessedAt,
+		lastResult: lastResult
+	};
+}
+
+function buildQueueStatusSignature(queue)
+{
+	var normalizedQueue = normalizeQueueStatusPayload(queue);
+	var lastResult = normalizedQueue.lastResult || {};
+
+	return [
+		String(normalizedQueue.pending || 0),
+		normalizedQueue.busy ? '1' : '0',
+		String(normalizedQueue.processed || 0),
+		String(normalizedQueue.lastProcessedAt || 0),
+		String(lastResult.action || ''),
+		String(lastResult.device || ''),
+		lastResult.ok ? '1' : '0',
+		String(lastResult.message || ''),
+		String(lastResult.processedAt || 0)
+	].join('|');
+}
+
+function showQueueStatusForDuration(durationMs)
+{
+	var chip = document.getElementById('queueStatusChip');
+	if (!chip) {
 		return;
 	}
-	var isVisible = !!visible;
-	group.classList.toggle('hidden', !isVisible);
-	toggleButton.textContent = isVisible ? 'Hide Templates' : 'Show Templates';
-	try {
-		window.localStorage.setItem('rtlSdrTemplatesExpanded', isVisible ? '1' : '0');
-	} catch (error) {
+
+	chip.classList.remove('hidden');
+
+	if (queueStatusHideTimer !== null) {
+		window.clearTimeout(queueStatusHideTimer);
+		queueStatusHideTimer = null;
 	}
+
+	var visibleMs = Number(durationMs);
+	if (!isFinite(visibleMs) || visibleMs <= 0) {
+		visibleMs = QUEUE_STATUS_VISIBLE_MS;
+	}
+
+	queueStatusHideTimer = window.setTimeout(function () {
+		var chipEl = document.getElementById('queueStatusChip');
+		if (chipEl) {
+			chipEl.classList.add('hidden');
+		}
+		queueStatusHideTimer = null;
+	}, visibleMs);
+}
+
+function renderQueueStatus()
+{
+	var chip = document.getElementById('queueStatusChip');
+	var text = document.getElementById('queueStatusText');
+	if (!chip || !text) {
+		return;
+	}
+
+	chip.classList.remove('pending');
+	chip.classList.remove('success');
+	chip.classList.remove('error');
+	chip.classList.remove('busy');
+
+	var queue = queueStatusState || {};
+	var message = 'Idle';
+	var title = 'No queued backend actions.';
+
+	if ((queue.pending || 0) > 0) {
+		message = String(queue.pending) + ' pending';
+		title = 'Queued retune actions are waiting for watchdog processing.';
+		chip.classList.add('pending');
+	} else if (queue.busy) {
+		message = 'Worker busy';
+		title = 'Queue worker is currently processing actions.';
+		chip.classList.add('busy');
+	} else if (queue.lastResult) {
+		var actionLabel = String(queue.lastResult.action || 'action').toUpperCase();
+		var deviceSuffix = queue.lastResult.device ? (' (' + queue.lastResult.device + ')') : '';
+		if (queue.lastResult.ok) {
+			message = 'Last ' + actionLabel + ' OK' + deviceSuffix;
+			title = queue.lastResult.message || 'Last queued action completed successfully.';
+			chip.classList.add('success');
+		} else {
+			message = 'Last ' + actionLabel + ' failed' + deviceSuffix;
+			title = queue.lastResult.message || 'Last queued action failed.';
+			chip.classList.add('error');
+		}
+	}
+
+	text.textContent = message;
+	chip.title = title;
+}
+
+function updateQueueStatusFromServer(queuePayload)
+{
+	if (queueStatusLastSignature === '') {
+		queueStatusLastSignature = buildQueueStatusSignature(queueStatusState);
+	}
+
+	var nextState = normalizeQueueStatusPayload(queuePayload);
+	var nextSignature = buildQueueStatusSignature(nextState);
+	var hasChanged = nextSignature !== queueStatusLastSignature;
+
+	queueStatusState = nextState;
+	queueStatusLastSignature = nextSignature;
+	renderQueueStatus();
+
+	if (hasChanged) {
+		showQueueStatusForDuration(QUEUE_STATUS_VISIBLE_MS);
+	}
+}
+
+function openTemplateDialog()
+{
+	var modal = document.getElementById('templateModal');
+	if (!modal) {
+		return;
+	}
+	refreshGlobalTemplateSelector();
+	refreshTemplateDeviceSelector();
+	modal.classList.remove('hidden');
+}
+
+function closeTemplateDialog()
+{
+	var modal = document.getElementById('templateModal');
+	if (!modal) {
+		return;
+	}
+	modal.classList.add('hidden');
 }
 
 function applyTheme(themeName)
@@ -4829,16 +6454,140 @@ function deleteRecordingServer()
 	}
 }
 
-function getDefaultMountForFormat(format)
+function normalizeMountNameSegment(streamName)
 {
-	return '/rtl-sdr.' + (String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3');
+	var raw = String(streamName == null ? '' : streamName).trim().toLowerCase();
+	if (raw === '') {
+		return 'rtl-sdr';
+	}
+	if (typeof raw.normalize === 'function') {
+		raw = raw.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+	}
+	raw = raw.replace(/[^a-z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^[-._]+|[-._]+$/g, '');
+	return raw === '' ? 'rtl-sdr' : raw;
 }
 
-function normalizeMountByFormat(mount, format)
+function getDefaultMountForName(streamName, format)
 {
+	var ext = String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	return '/' + normalizeMountNameSegment(streamName) + '.' + ext;
+}
+
+function getDefaultMountForDeviceIndex(deviceIndex, format)
+{
+	var ext = String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var normalizedIndex = normalizeClientDeviceIndex(deviceIndex);
+	if (normalizedIndex === '') {
+		normalizedIndex = '0';
+	}
+
+	return '/dev' + normalizedIndex + '.' + ext;
+}
+
+function inferMountFollowsStreamName(mount, streamName, format)
+{
+	var normalized = String(mount == null ? '' : mount).trim();
+	if (normalized === '') {
+		return true;
+	}
+	if (normalized.charAt(0) !== '/') {
+		normalized = '/' + normalized;
+	}
+	var ext = String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var legacyDefault = '/rtl-sdr.' + ext;
+	var byNameDefault = getDefaultMountForName(streamName, ext);
+	var lowered = normalized.toLowerCase();
+	return lowered === legacyDefault.toLowerCase() || lowered === byNameDefault.toLowerCase();
+}
+
+function inferMountFollowsDeviceIndex(mount, deviceIndex, format)
+{
+	var normalized = String(mount == null ? '' : mount).trim();
+	if (normalized === '') {
+		return false;
+	}
+	if (normalized.charAt(0) !== '/') {
+		normalized = '/' + normalized;
+	}
+	var ext = String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var byDeviceDefault = getDefaultMountForDeviceIndex(deviceIndex, ext);
+	return normalized.toLowerCase() === byDeviceDefault.toLowerCase();
+}
+
+function normalizeMountLinkMode(value)
+{
+	var mode = String(value == null ? '' : value).trim().toLowerCase();
+	if (mode === 'device' || mode === 'dev' || mode === 'link-device' || mode === 'device-index' || mode === 'index') {
+		return 'device';
+	}
+	if (mode === 'name' || mode === 'stream' || mode === 'stream-name' || mode === 'linked' || mode === 'auto') {
+		return 'name';
+	}
+	if (mode === 'manual' || mode === 'none' || mode === 'off' || mode === 'custom') {
+		return 'manual';
+	}
+	return '';
+}
+
+function resolveMountLinkModeForConfig(config, deviceIndex)
+{
+	var source = (config && typeof config === 'object') ? config : {};
+	var streamName = String(source.streamName || '');
+	var streamFormat = String(source.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+
+	var explicitMode = normalizeMountLinkMode(source.streamMountLinkMode);
+	if (explicitMode !== '') {
+		return explicitMode;
+	}
+
+	var inferredFollowDevice = inferMountFollowsDeviceIndex(source.streamMount, deviceIndex, streamFormat);
+	var followDevice = Object.prototype.hasOwnProperty.call(source, 'streamMountFollowDevice')
+		? parseClientBooleanFlag(source.streamMountFollowDevice, inferredFollowDevice)
+		: inferredFollowDevice;
+	if (followDevice) {
+		return 'device';
+	}
+
+	var inferredFollowName = inferMountFollowsStreamName(source.streamMount, streamName, streamFormat);
+	var followName = Object.prototype.hasOwnProperty.call(source, 'streamMountFollowName')
+		? parseClientBooleanFlag(source.streamMountFollowName, inferredFollowName)
+		: inferredFollowName;
+
+	return followName ? 'name' : 'manual';
+}
+
+function normalizeMountByFormat(mount, streamName, format, followName, followDevice, deviceIndex)
+{
+	var ext = String(format).toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var normalizedDeviceIndex = normalizeClientDeviceIndex(deviceIndex);
+	var shouldFollowDevice = followDevice;
+	if (shouldFollowDevice === undefined || shouldFollowDevice === null) {
+		shouldFollowDevice = inferMountFollowsDeviceIndex(mount, normalizedDeviceIndex, ext);
+	} else {
+		shouldFollowDevice = parseClientBooleanFlag(shouldFollowDevice, false);
+	}
+
+	var shouldFollow = followName;
+	if (shouldFollow === undefined || shouldFollow === null) {
+		shouldFollow = inferMountFollowsStreamName(mount, streamName, ext);
+	} else {
+		shouldFollow = parseClientBooleanFlag(shouldFollow, true);
+	}
+
+	if (shouldFollowDevice) {
+		shouldFollow = false;
+	}
+
+	var preferredByName = getDefaultMountForName(streamName, ext);
+	var preferredByDevice = getDefaultMountForDeviceIndex(normalizedDeviceIndex, ext);
+	var preferred = shouldFollowDevice ? preferredByDevice : preferredByName;
+	if (shouldFollowDevice || shouldFollow) {
+		return preferred;
+	}
+
 	var raw = String(mount == null ? '' : mount).trim();
 	if (raw === '') {
-		return getDefaultMountForFormat(format);
+		return preferredByName;
 	}
 	if (raw.charAt(0) !== '/') {
 		raw = '/' + raw;
@@ -4929,7 +6678,13 @@ function buildCtcssOptions(selectedTone)
 function buildStreamPlaybackUrl(config)
 {
 	var target = String(config.streamTarget || '').trim();
-	var mount = normalizeMountByFormat(config.streamMount, config.streamFormat || 'mp3');
+	var streamName = String(config.streamName || '').trim();
+	var streamFormat = String(config.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var deviceIndex = normalizeClientDeviceIndex(String(config.deviceIndex || getDeviceIndexForId(config.device || '')));
+	var linkMode = resolveMountLinkModeForConfig(config, deviceIndex);
+	var followDevice = linkMode === 'device';
+	var followName = linkMode === 'name';
+	var mount = normalizeMountByFormat(config.streamMount, streamName, streamFormat, followName, followDevice, deviceIndex);
 	if (target === '') {
 		return '';
 	}
@@ -4939,7 +6694,13 @@ function buildStreamPlaybackUrl(config)
 function buildProxyStreamUrl(config)
 {
 	var target = String(config.streamTarget || '').trim();
-	var mount = normalizeMountByFormat(config.streamMount, config.streamFormat || 'mp3');
+	var streamName = String(config.streamName || '').trim();
+	var streamFormat = String(config.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var deviceIndex = normalizeClientDeviceIndex(String(config.deviceIndex || getDeviceIndexForId(config.device || '')));
+	var linkMode = resolveMountLinkModeForConfig(config, deviceIndex);
+	var followDevice = linkMode === 'device';
+	var followName = linkMode === 'name';
+	var mount = normalizeMountByFormat(config.streamMount, streamName, streamFormat, followName, followDevice, deviceIndex);
 	if (target === '') {
 		return '';
 	}
@@ -5218,10 +6979,18 @@ function sanitizeTemplateConfig(config)
 	delete clean.deviceIndex;
 	delete clean.deviceSerial;
 	delete clean.outputDir;
+	delete clean.streamMountFollowDevice;
+	delete clean.streamMountLinkMode;
 	clean.dcs = normalizeClientDcsCode(clean.dcs);
 	clean.ctcss = normalizeClientCtcssTone(clean.ctcss);
 	clean.streamFormat = String(clean.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
-	clean.streamMount = normalizeMountByFormat(clean.streamMount, clean.streamFormat);
+	clean.streamName = String(clean.streamName || '');
+	var templateFollowName = parseClientBooleanFlag(
+		clean.streamMountFollowName,
+		inferMountFollowsStreamName(clean.streamMount, clean.streamName, clean.streamFormat)
+	);
+	clean.streamMountFollowName = templateFollowName;
+	clean.streamMount = normalizeMountByFormat(clean.streamMount, clean.streamName, clean.streamFormat, templateFollowName, false, '');
 	return clean;
 }
 
@@ -5232,13 +7001,42 @@ function applyTemplateToDevice(deviceId, templateName)
 		throw new Error('Template not found.');
 	}
 	var current = getConfigForDevice(deviceId);
+	var currentLinkMode = resolveMountLinkModeForConfig(current, current.deviceIndex || getDeviceIndexForId(deviceId));
+	var currentFollowDevice = currentLinkMode === 'device';
 	var merged = Object.assign({}, current, settingsTemplates[name]);
 	merged.device = String(deviceId);
 	merged.deviceIndex = normalizeClientDeviceIndex(String(getDeviceIndexForId(deviceId) || merged.deviceIndex || ''));
 	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
-	merged.streamMount = normalizeMountByFormat(merged.streamMount, merged.streamFormat);
+	merged.streamName = String(merged.streamName || '');
+	var templateFollowName = parseClientBooleanFlag(
+		merged.streamMountFollowName,
+		inferMountFollowsStreamName(merged.streamMount, merged.streamName, merged.streamFormat)
+	);
+	merged.streamMountFollowName = templateFollowName;
+	merged.streamMountFollowDevice = currentFollowDevice;
+	if (currentFollowDevice) {
+		merged.streamMountLinkMode = 'device';
+	} else {
+		var mergedLinkMode = normalizeMountLinkMode(merged.streamMountLinkMode);
+		if (mergedLinkMode === 'device') {
+			mergedLinkMode = templateFollowName ? 'name' : 'manual';
+		}
+		if (mergedLinkMode === '') {
+			mergedLinkMode = templateFollowName ? 'name' : 'manual';
+		}
+		merged.streamMountLinkMode = mergedLinkMode;
+		merged.streamMountFollowName = mergedLinkMode === 'name';
+	}
+	merged.streamMount = normalizeMountByFormat(
+		merged.streamMount,
+		merged.streamName,
+		merged.streamFormat,
+		merged.streamMountFollowName,
+		merged.streamMountFollowDevice,
+		merged.deviceIndex
+	);
 	merged = applyClientOutputSelection(merged);
 	var streamServerId = String(merged.streamServerId || '').trim();
 	if (streamServerId === '' || !getStreamServerById(streamServerId)) {
@@ -5294,6 +7092,9 @@ function getDefaultConfig(deviceId)
 		streamBitrate: '128',
 		streamTarget: '127.0.0.1:8000',
 		streamMount: '/rtl-sdr.mp3',
+		streamMountLinkMode: 'name',
+		streamMountFollowName: true,
+		streamMountFollowDevice: false,
 		streamUsername: '',
 		streamPassword: '',
 		streamName: '',
@@ -5403,33 +7204,291 @@ function syncAfterRecordFields(card)
 function syncMountWithStreamFormat(card, force)
 {
 	var formatSelect = card.querySelector('.field-stream-format');
+	var streamNameInput = card.querySelector('.field-stream-name');
 	var mountInput = card.querySelector('.field-stream-mount');
+	var linkModeSelect = card.querySelector('.field-stream-mount-link-mode');
 	if (!formatSelect || !mountInput) {
 		return;
 	}
-	var current = String(mountInput.value || '').trim();
+	var deviceId = normalizeClientDeviceId(String(card.getAttribute('data-device-id') || ''));
+	var deviceIndex = normalizeClientDeviceIndex(String(getDeviceIndexForId(deviceId) || ''));
+	var streamName = streamNameInput ? String(streamNameInput.value || '').trim() : '';
 	var format = String(formatSelect.value || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
-	var preferred = getDefaultMountForFormat(format);
-	var alternative = getDefaultMountForFormat(format === 'ogg' ? 'mp3' : 'ogg');
-	if (force) {
-		var next = current;
-		if (next === '') {
-			next = preferred;
-		} else if (/\.(mp3|ogg)$/i.test(next)) {
-			next = next.replace(/\.(mp3|ogg)$/i, '.' + format);
-		} else if (/\.[A-Za-z0-9]+$/.test(next)) {
-			next = next.replace(/\.[A-Za-z0-9]+$/, '.' + format);
-		} else {
-			next = next + '.' + format;
-		}
-		if (next.charAt(0) !== '/') {
-			next = '/' + next;
-		}
-		mountInput.value = next;
-	} else if (current === '' || current === alternative) {
-		mountInput.value = preferred;
+	var preferredByName = getDefaultMountForName(streamName, format);
+	var preferredByDevice = getDefaultMountForDeviceIndex(deviceIndex, format);
+	var currentMount = String(mountInput.value || '').trim();
+	var inferredFollowDevice = inferMountFollowsDeviceIndex(currentMount, deviceIndex, format);
+	var inferredFollowName = !inferredFollowDevice && inferMountFollowsStreamName(currentMount, streamName, format);
+	var linkMode = linkModeSelect ? normalizeMountLinkMode(linkModeSelect.value) : '';
+	if (linkMode === '') {
+		linkMode = inferredFollowDevice ? 'device' : (inferredFollowName ? 'name' : 'manual');
 	}
-	mountInput.placeholder = preferred;
+
+	if (linkModeSelect) {
+		linkModeSelect.value = linkMode;
+	}
+
+	if (linkMode === 'device') {
+		mountInput.value = preferredByDevice;
+	} else if (linkMode === 'name') {
+		mountInput.value = preferredByName;
+	} else {
+		var current = String(mountInput.value || '').trim();
+		if (current === '' && force) {
+			mountInput.value = preferredByName;
+		} else if (current !== '' && current.charAt(0) !== '/') {
+			mountInput.value = '/' + current;
+		}
+	}
+
+	var placeholder = linkMode === 'device' ? preferredByDevice : preferredByName;
+	var isLinked = linkMode === 'device' || linkMode === 'name';
+	mountInput.placeholder = placeholder;
+	mountInput.readOnly = isLinked;
+	mountInput.classList.toggle('is-readonly', isLinked);
+	if (linkMode === 'name') {
+		mountInput.title = 'Automatically follows Stream Name. Set Mount Link to Manual to override.';
+	} else if (linkMode === 'device') {
+		mountInput.title = 'Automatically follows device index. Set Mount Link to Manual to override.';
+	} else {
+		mountInput.title = '';
+	}
+}
+
+function splitPipelineCommandStages(commandLine)
+{
+	var raw = String(commandLine || '').trim();
+	if (raw === '') {
+		return [];
+	}
+
+	var stages = [];
+	var current = '';
+	var inSingleQuote = false;
+	var inDoubleQuote = false;
+	var escaped = false;
+
+	for (var i = 0; i < raw.length; i++) {
+		var ch = raw.charAt(i);
+		if (escaped) {
+			current += ch;
+			escaped = false;
+			continue;
+		}
+
+		if (ch === '\\') {
+			current += ch;
+			escaped = true;
+			continue;
+		}
+
+		if (ch === "'" && !inDoubleQuote) {
+			inSingleQuote = !inSingleQuote;
+			current += ch;
+			continue;
+		}
+
+		if (ch === '"' && !inSingleQuote) {
+			inDoubleQuote = !inDoubleQuote;
+			current += ch;
+			continue;
+		}
+
+		if (ch === '|' && !inSingleQuote && !inDoubleQuote) {
+			var stage = current.trim();
+			if (stage !== '') {
+				stages.push(stage);
+			}
+			current = '';
+			continue;
+		}
+
+		current += ch;
+	}
+
+	var finalStage = current.trim();
+	if (finalStage !== '') {
+		stages.push(finalStage);
+	}
+
+	return stages;
+}
+
+function buildPipelineStagePreviewLines(config)
+{
+	var source = (config && typeof config === 'object') ? config : {};
+	var lines = [];
+	var outputSelection = getClientOutputSelection(source);
+	var deviceIndex = normalizeClientDeviceIndex(String(source.deviceIndex || getDeviceIndexForId(source.device || '')));
+	var streamFormat = String(source.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
+	var streamName = String(source.streamName || '');
+	var mountLinkMode = resolveMountLinkModeForConfig(source, deviceIndex);
+	var followDevice = mountLinkMode === 'device';
+	var followName = mountLinkMode === 'name';
+	var mount = normalizeMountByFormat(source.streamMount, streamName, streamFormat, followName, followDevice, deviceIndex);
+
+	var rtlLine = 'rtl_fm';
+	var frequency = String(source.frequency || '').trim();
+	if (frequency !== '') {
+		rtlLine += ' -f ' + frequency;
+	}
+	rtlLine += ' -M ' + String(source.mode || 'fm');
+	var rtlBandwidth = String(source.rtlBandwidth || '12000');
+	rtlLine += ' -s ' + rtlBandwidth + ' -r ' + rtlBandwidth;
+	var squelch = String(source.squelch || '').trim();
+	if (squelch !== '') {
+		rtlLine += ' -l ' + squelch;
+	}
+	if (deviceIndex !== '') {
+		rtlLine += ' -d ' + deviceIndex;
+	}
+	if (isBiasTEnabledValue(source.biasT)) {
+		rtlLine += ' -T';
+	}
+	lines.push(rtlLine);
+
+	var dcsCode = normalizeClientDcsCode(source.dcs);
+	var ctcssTone = normalizeClientCtcssTone(source.ctcss);
+	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
+		var recorderBothLine = 'rms-cast-recorder --stdin --stdout-pad';
+		recorderBothLine += ' -t ' + String(source.threshold || '-40');
+		recorderBothLine += ' -s ' + String(source.silence || '2');
+		if (dcsCode !== '') {
+			recorderBothLine += ' --dcs ' + dcsCode;
+		}
+		if (ctcssTone !== '') {
+			recorderBothLine += ' --ctcss ' + ctcssTone;
+		}
+		lines.push(recorderBothLine);
+	} else if (outputSelection.streamEnabled) {
+		var conditionerLine = 'rms-cast-recorder --stdin --stdout-pad';
+		if (dcsCode !== '') {
+			conditionerLine += ' --dcs ' + dcsCode;
+		}
+		if (ctcssTone !== '') {
+			conditionerLine += ' --ctcss ' + ctcssTone;
+		}
+		lines.push(conditionerLine);
+	} else {
+		var recorderLine = 'rms-cast-recorder --stdin';
+		recorderLine += ' -t ' + String(source.threshold || '-40');
+		recorderLine += ' -s ' + String(source.silence || '2');
+		if (dcsCode !== '') {
+			recorderLine += ' --dcs ' + dcsCode;
+		}
+		if (ctcssTone !== '') {
+			recorderLine += ' --ctcss ' + ctcssTone;
+		}
+		var afterRecordAction = String(source.afterRecordAction || 'none').toLowerCase();
+		if (afterRecordAction !== '' && afterRecordAction !== 'none') {
+			recorderLine += ' --after ' + afterRecordAction;
+		}
+		lines.push(recorderLine);
+	}
+
+	if (outputSelection.streamEnabled) {
+		var codec = streamFormat === 'ogg' ? 'libvorbis' : 'libmp3lame';
+		var bitrate = String(source.streamBitrate || '128').trim() || '128';
+		var streamTarget = String(source.streamTarget || '').trim();
+		var streamUsername = String(source.streamUsername || '').trim();
+		var streamPassword = String(source.streamPassword || '');
+		var authPrefix = '';
+		if (streamUsername !== '' && streamPassword !== '') {
+			authPrefix = streamUsername + ':' + streamPassword + '@';
+		}
+		var destination = streamTarget !== ''
+			? ('icecast://' + authPrefix + streamTarget + mount)
+			: ('icecast://<target>' + mount);
+		lines.push('ffmpeg -hide_banner -loglevel warning -nostats -f s16le -ar ' + rtlBandwidth + ' -ac 1 -i pipe:0 -vn -b:a ' + bitrate + 'k -c:a ' + codec + ' -f ' + streamFormat + ' ' + destination);
+	}
+
+	return lines;
+}
+
+function buildFullPipelineCommandForDeviceCard(instance, config)
+{
+	var runningCommand = (instance && typeof instance === 'object' && typeof instance.command === 'string')
+		? String(instance.command || '').trim()
+		: '';
+	if (runningCommand !== '') {
+		return runningCommand;
+	}
+
+	var previewStages = buildPipelineStagePreviewLines(config);
+	if (!previewStages.length) {
+		return '';
+	}
+
+	return previewStages.join(' | ');
+}
+
+function buildPipelineLinesForDeviceCard(instance, config)
+{
+	var runningCommand = (instance && typeof instance === 'object' && typeof instance.command === 'string')
+		? String(instance.command || '').trim()
+		: '';
+	if (runningCommand !== '') {
+		var runningStages = splitPipelineCommandStages(runningCommand);
+		if (runningStages.length > 0) {
+			return runningStages;
+		}
+	}
+
+	return buildPipelineStagePreviewLines(config);
+}
+
+function pipelineLinesMarkup(instance, config)
+{
+	var lines = buildPipelineLinesForDeviceCard(instance, config);
+	if (!lines.length) {
+		lines = ['Pipeline unavailable.'];
+	}
+
+	var htmlLines = [];
+	for (var i = 0; i < lines.length; i++) {
+		var fullLine = String(lines[i] || '');
+		htmlLines.push('<span class="pipeline-line" title="' + escapeHtml(fullLine) + '">' + escapeHtml(fullLine) + '</span>');
+	}
+
+	return htmlLines.join('');
+}
+
+function copyFullPipelineForCard(card)
+{
+	var deviceId = normalizeClientDeviceId(String(card.getAttribute('data-device-id') || '').trim());
+	if (deviceId === '') {
+		setStatus('Missing device id.', true);
+		return;
+	}
+
+	var config = readCardConfig(card);
+	var instance = knownInstancesByDevice[deviceId] || null;
+	var fullPipeline = buildFullPipelineCommandForDeviceCard(instance, config);
+	if (fullPipeline === '') {
+		setStatus('Pipeline unavailable for device ' + deviceId + '.', true);
+		return;
+	}
+
+	if (navigator.clipboard && navigator.clipboard.writeText) {
+		navigator.clipboard.writeText(fullPipeline).then(function () {
+			setStatus('Copied full pipeline for device ' + deviceId + '.', false);
+		}).catch(function () {
+			setStatus('Unable to copy full pipeline.', true);
+		});
+		return;
+	}
+
+	var temp = document.createElement('textarea');
+	temp.value = fullPipeline;
+	document.body.appendChild(temp);
+	temp.select();
+	try {
+		document.execCommand('copy');
+		setStatus('Copied full pipeline for device ' + deviceId + '.', false);
+	} catch (error) {
+		setStatus('Unable to copy full pipeline.', true);
+	}
+	document.body.removeChild(temp);
 }
 
 function formatLogText(deviceId)
@@ -5760,6 +7819,56 @@ function exportSelectedTemplateForCard(card)
 	exportTemplateByName(templateName);
 }
 
+function deleteTemplateByName(templateName)
+{
+	var name = String(templateName || '').trim();
+	if (name === '') {
+		setStatus('Select a template to delete.', true);
+		return Promise.resolve(false);
+	}
+
+	if (!settingsTemplates[name] || typeof settingsTemplates[name] !== 'object') {
+		setStatus('Selected template was not found.', true);
+		return Promise.resolve(false);
+	}
+
+	delete settingsTemplates[name];
+
+	var clearedDeviceCount = 0;
+	for (var deviceId in deviceConfigsById) {
+		if (!Object.prototype.hasOwnProperty.call(deviceConfigsById, deviceId)) {
+			continue;
+		}
+
+		var existingConfig = deviceConfigsById[deviceId];
+		if (!existingConfig || typeof existingConfig !== 'object') {
+			continue;
+		}
+
+		if (String(existingConfig.templateName || '') !== name) {
+			continue;
+		}
+
+		var updatedConfig = Object.assign({}, existingConfig);
+		updatedConfig.templateName = '';
+		deviceConfigsById[deviceId] = updatedConfig;
+		saveDeviceConfigs(String(deviceId));
+		clearedDeviceCount++;
+	}
+
+	return saveTemplates().then(function () {
+		refreshGlobalTemplateSelector();
+		renderDeviceList();
+
+		var message = 'Deleted template "' + name + '".';
+		if (clearedDeviceCount > 0) {
+			message += ' Cleared template assignment on ' + clearedDeviceCount + ' device(s).';
+		}
+		setStatus(message, false);
+		return true;
+	});
+}
+
 function importTemplateFromFileForToolbar(file)
 {
 	readTextFile(file).then(function (contents) {
@@ -5888,8 +7997,23 @@ function getRxIndicator(deviceId, isRunning, config)
 function getConfigForDevice(deviceId)
 {
 	var base = getDefaultConfig(deviceId);
-	var saved = deviceConfigsById[String(deviceId)] || {};
 	var descriptor = getDeviceDescriptor(deviceId);
+	var saved = deviceConfigsById[String(deviceId)] || {};
+	if (!saved || typeof saved !== 'object' || Array.isArray(saved)) {
+		saved = {};
+	}
+	if (Object.keys(saved).length === 0) {
+		var serialLookup = normalizeAntennaSerial(String(descriptor.serial || getDeviceSerialForId(deviceId)));
+		if (serialLookup !== '') {
+			var serialKey = 'sn:' + serialLookup;
+			if (Object.prototype.hasOwnProperty.call(deviceConfigsById, serialKey)) {
+				var serialSaved = deviceConfigsById[serialKey];
+				if (serialSaved && typeof serialSaved === 'object' && !Array.isArray(serialSaved)) {
+					saved = serialSaved;
+				}
+			}
+		}
+	}
 	var merged = {};
 	for (var key in base) {
 		if (Object.prototype.hasOwnProperty.call(base, key)) {
@@ -5911,7 +8035,27 @@ function getConfigForDevice(deviceId)
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamBitrate = String(merged.streamBitrate || '128');
 	merged.streamTarget = String(merged.streamTarget || '127.0.0.1:8000');
-	merged.streamMount = normalizeMountByFormat(merged.streamMount, merged.streamFormat);
+	merged.streamName = String(merged.streamName || '');
+	var inferredMountFollowName = inferMountFollowsStreamName(merged.streamMount, merged.streamName, merged.streamFormat);
+	var parsedMountFollowName = parseClientBooleanFlag(merged.streamMountFollowName, inferredMountFollowName);
+	var mergedMountLinkMode = resolveMountLinkModeForConfig(merged, merged.deviceIndex);
+	var mergedMountFollowDevice = mergedMountLinkMode === 'device';
+	if (mergedMountLinkMode === 'name') {
+		parsedMountFollowName = true;
+	} else if (mergedMountLinkMode === 'manual') {
+		parsedMountFollowName = false;
+	}
+	merged.streamMountLinkMode = mergedMountLinkMode;
+	merged.streamMountFollowName = parsedMountFollowName;
+	merged.streamMountFollowDevice = mergedMountFollowDevice;
+	merged.streamMount = normalizeMountByFormat(
+		merged.streamMount,
+		merged.streamName,
+		merged.streamFormat,
+		merged.streamMountFollowName,
+		merged.streamMountFollowDevice,
+		merged.deviceIndex
+	);
 	merged.streamUsername = String(merged.streamUsername || '');
 	merged.streamPassword = String(merged.streamPassword || '');
 	merged.streamServerId = String(merged.streamServerId || '').trim();
@@ -6254,6 +8398,7 @@ function renderDeviceList()
 		var logToggleLabel = isLogOpen(deviceId) ? 'Collapse Logs' : 'Expand Logs';
 		var logCache = logContentByDevice[deviceId] || {};
 		var logMeta = logCache.logFile ? logCache.logFile : 'No log loaded';
+		var pipelineTileMarkup = pipelineLinesMarkup(instance, config);
 		var templateSelectOptions = templateOptionsMarkup(String(config.templateName || ''));
 		var isListening = !!streamPlayersByDevice[deviceId];
 		var streamControlsEnabled = isStreamMode;
@@ -6276,7 +8421,20 @@ function renderDeviceList()
 		var streamActionButtonsHtml =
 			'<button type="button" class="refresh-button action-copy-stream"' + copyControlDisabledAttr + copyControlDisabledTitleAttr + '>Copy Stream URL</button>' +
 			'<button type="button" class="' + listenButtonClass + '"' + listenControlDisabledAttr + listenControlDisabledTitleAttr + '>' + listenButtonLabel + '</button>';
-		var streamNameRow = '';
+		var streamNameValue = String(config.streamName || '').trim();
+		if (streamNameValue === '') {
+			streamNameValue = '(untitled)';
+		}
+		var streamNameRow = '<div class="device-stream-name">' + escapeHtml(streamNameValue) + '</div>';
+		var mountLinkMode = resolveMountLinkModeForConfig(config, String(config.deviceIndex || displayIndex));
+		var mountFollowDevice = mountLinkMode === 'device';
+		var mountPlaceholder = mountFollowDevice
+			? getDefaultMountForDeviceIndex(String(config.deviceIndex || displayIndex), String(config.streamFormat || 'mp3'))
+			: getDefaultMountForName(String(config.streamName || ''), String(config.streamFormat || 'mp3'));
+		var mountLinkOptions = '' +
+			'<option value="name"' + (mountLinkMode === 'name' ? ' selected' : '') + '>Tie to Stream Name</option>' +
+			'<option value="device"' + (mountLinkMode === 'device' ? ' selected' : '') + '>Link to Device</option>' +
+			'<option value="manual"' + (mountLinkMode === 'manual' ? ' selected' : '') + '>Manual</option>';
 		var antennaSerial = normalizeAntennaSerial(String(config.deviceSerial || getDeviceSerialForId(deviceId)));
 		var antennaDescription = antennaSerial === '' ? '' : getAntennaDescriptionForDevice(deviceId, config);
 		var antennaLabelText = antennaSerial === ''
@@ -6295,9 +8453,7 @@ function renderDeviceList()
 		if (ctcssTone !== '') {
 			squelchMetaValue += ' / CTCSS ' + ctcssTone + ' Hz';
 		}
-		if (String(config.streamName || '').trim() !== '') {
-			streamNameRow = '<div class="device-stream-name">' + escapeHtml(String(config.streamName || '')) + '</div>';
-		}
+
 		markup += '' +
 			'<article class="panel device-card" data-device-id="' + escapeHtml(deviceId) + '">' +
 				'<div class="device-header">' +
@@ -6327,6 +8483,7 @@ function renderDeviceList()
 					'<div class="meta-box"><span class="meta-label">PID</span><span class="meta-value">' + escapeHtml(metaPid) + '</span></div>' +
 					'<div class="meta-box"><span class="meta-label">Squelch</span><span class="meta-value">' + escapeHtml(squelchMetaValue) + '</span></div>' +
 					'<div class="meta-box full"><span class="meta-label">Log File</span><span class="meta-value">' + escapeHtml(metaLog) + '</span></div>' +
+					'<div class="meta-box full"><div class="meta-label-row"><span class="meta-label">Pipeline</span><button type="button" class="refresh-button compact action-copy-pipeline">Copy Full Pipeline</button></div><span class="meta-value pipeline-lines">' + pipelineTileMarkup + '</span></div>' +
 				'</div>' +
 				'<div class="' + configPanelClass + '">' +
 					'<div class="form-row single">' +
@@ -6382,7 +8539,8 @@ function renderDeviceList()
 						'<div style="flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end;"><button type="button" class="refresh-button action-edit-server" style="padding: 6px 12px;">Edit</button><button type="button" class="refresh-button action-new-server" style="padding: 6px 12px;">New</button></div>' +
 					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
-						'<div><label>Mount Point</label><input type="text" class="field-stream-mount" value="' + escapeHtml(String(config.streamMount || '')) + '" placeholder="/rtl-sdr.' + escapeHtml(String(config.streamFormat || 'mp3')) + '"></div>' +
+						'<div><label>Mount Point</label><input type="text" class="field-stream-mount" value="' + escapeHtml(String(config.streamMount || '')) + '" placeholder="' + escapeHtml(mountPlaceholder) + '"></div>' +
+						'<div><label>Mount Link</label><select class="field-stream-mount-link-mode">' + mountLinkOptions + '</select></div>' +
 					'</div>' +
 					'<div class="form-row single output-recorder-only">' +
 						'<div><label>After Record</label><select class="field-after-record-action"><option value="none">None</option><option value="upload">Upload</option><option value="upload_delete">Upload and Delete (Locally)</option><option value="command">Run Command</option></select></div>' +
@@ -6537,6 +8695,7 @@ function readCardConfig(card)
 	var descriptor = getDeviceDescriptor(deviceId);
 	var deviceIndex = normalizeClientDeviceIndex(String(existingConfig.deviceIndex || descriptor.index || ''));
 	var deviceSerial = normalizeAntennaSerial(String(existingConfig.deviceSerial || getDeviceSerialForId(deviceId)));
+	var persistedDeviceId = deviceSerial !== '' ? ('sn:' + deviceSerial) : deviceId;
 
 	var streamServerId = card.querySelector('.field-stream-server-id').value.trim();
 	var streamTarget = '';
@@ -6599,8 +8758,36 @@ function readCardConfig(card)
 		recordingUploadPassword = '';
 	}
 
+	var streamNameInput = card.querySelector('.field-stream-name');
+	var streamName = streamNameInput ? streamNameInput.value.trim() : '';
+	var streamFormatField = card.querySelector('.field-stream-format');
+	var streamFormat = streamFormatField ? streamFormatField.value.trim() : 'mp3';
+	var streamMountInput = card.querySelector('.field-stream-mount');
+	var streamMountLinkModeSelect = card.querySelector('.field-stream-mount-link-mode');
+	var requestedMountLinkMode = streamMountLinkModeSelect ? normalizeMountLinkMode(streamMountLinkModeSelect.value) : '';
+	var streamMountRaw = streamMountInput ? streamMountInput.value.trim() : '';
+	if (requestedMountLinkMode === '') {
+		if (inferMountFollowsDeviceIndex(streamMountRaw, deviceIndex, streamFormat)) {
+			requestedMountLinkMode = 'device';
+		} else if (inferMountFollowsStreamName(streamMountRaw, streamName, streamFormat)) {
+			requestedMountLinkMode = 'name';
+		} else {
+			requestedMountLinkMode = 'manual';
+		}
+	}
+	var streamMountFollowDevice = requestedMountLinkMode === 'device';
+	var streamMountFollowName = requestedMountLinkMode === 'name' || streamMountFollowDevice;
+	var streamMount = normalizeMountByFormat(
+		streamMountRaw,
+		streamName,
+		streamFormat,
+		streamMountFollowName,
+		streamMountFollowDevice,
+		deviceIndex
+	);
+
 	return {
-		device: deviceId,
+		device: persistedDeviceId,
 		deviceIndex: deviceIndex,
 		deviceSerial: deviceSerial,
 		frequency: card.querySelector('.field-frequency').value.trim(),
@@ -6619,14 +8806,17 @@ function readCardConfig(card)
 		biasT: card.querySelector('.field-bias-t').value.trim(),
 		threshold: card.querySelector('.field-threshold').value.trim(),
 		silence: card.querySelector('.field-silence').value.trim(),
-		streamFormat: card.querySelector('.field-stream-format').value.trim(),
+		streamFormat: streamFormat,
 		streamBitrate: card.querySelector('.field-stream-bitrate').value.trim(),
 		streamTarget: streamTarget,
-		streamMount: card.querySelector('.field-stream-mount').value.trim(),
+		streamMount: streamMount,
+		streamMountLinkMode: requestedMountLinkMode,
+		streamMountFollowName: streamMountFollowName,
+		streamMountFollowDevice: streamMountFollowDevice,
 		streamUsername: streamUsername,
 		streamPassword: streamPassword,
 		streamServerId: streamServerId,
-		streamName: card.querySelector('.field-stream-name').value.trim(),
+		streamName: streamName,
 		afterRecordAction: afterRecordAction,
 		recordingServerId: recordingServerId,
 		recordingUploadUrl: recordingUploadUrl,
@@ -6814,6 +9004,8 @@ function bindDeviceCard(card)
 	var recordEnabledCheckbox = card.querySelector('.field-record-enabled');
 	var streamEnabledCheckbox = card.querySelector('.field-stream-enabled');
 	var streamFormatSelect = card.querySelector('.field-stream-format');
+	var streamNameInput = card.querySelector('.field-stream-name');
+	var streamMountLinkModeSelect = card.querySelector('.field-stream-mount-link-mode');
 	var afterRecordSelect = card.querySelector('.field-after-record-action');
 	var recordingServerSelect = card.querySelector('.field-recording-server-id');
 	var postCommandArgInput = card.querySelector('.field-post-command-arg');
@@ -6837,6 +9029,9 @@ function bindDeviceCard(card)
 		streamEnabledCheckbox.checked = storedOutputSelection.streamEnabled;
 	}
 	streamFormatSelect.value = storedConfig.streamFormat || 'mp3';
+	if (streamMountLinkModeSelect) {
+		streamMountLinkModeSelect.value = resolveMountLinkModeForConfig(storedConfig, storedConfig.deviceIndex || getDeviceIndexForId(deviceId));
+	}
 	if (afterRecordSelect) {
 		afterRecordSelect.value = String(storedConfig.afterRecordAction || 'none');
 	}
@@ -6872,6 +9067,19 @@ function bindDeviceCard(card)
 	streamFormatSelect.addEventListener('change', function () {
 		syncMountWithStreamFormat(card, true);
 	});
+	if (streamNameInput) {
+		streamNameInput.addEventListener('input', function () {
+			syncMountWithStreamFormat(card, true);
+		});
+		streamNameInput.addEventListener('change', function () {
+			syncMountWithStreamFormat(card, true);
+		});
+	}
+	if (streamMountLinkModeSelect) {
+		streamMountLinkModeSelect.addEventListener('change', function () {
+			syncMountWithStreamFormat(card, true);
+		});
+	}
 	var squelchInput = card.querySelector('.field-squelch');
 	squelchInput.value = normalizeClientSquelchValue(squelchInput.value);
 	syncSquelchValidity(squelchInput);
@@ -6980,6 +9188,13 @@ function bindDeviceCard(card)
 	if (copyStreamButton) {
 		copyStreamButton.addEventListener('click', function () {
 			copyStreamUrlForCard(card);
+		});
+	}
+
+	var copyPipelineButton = card.querySelector('.action-copy-pipeline');
+	if (copyPipelineButton) {
+		copyPipelineButton.addEventListener('click', function () {
+			copyFullPipelineForCard(card);
 		});
 	}
 
@@ -7251,6 +9466,7 @@ function refreshInstances()
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
 		applyUiSettingsFromServerPayload(result && result.settings ? result.settings : null);
+		updateQueueStatusFromServer(result && result.queue ? result.queue : null);
 		var pauseAutoRender = shouldPauseAutoRefreshRender();
 		if (!pauseAutoRender) {
 			renderDeviceList();
@@ -7278,8 +9494,23 @@ function startOrRetuneCard(card)
 	deviceConfigsById[String(config.device)] = config;
 	saveDeviceConfigs(String(config.device));
 	openConfigPanelsByDevice[String(config.device)] = false;
-	setStatus('Applying config for device ' + (config.device || '?') + '...', false);
-	postUserAction('start', config).then(function (result) {
+	var normalizedDeviceId = normalizeClientDeviceId(String(config.device || '').trim());
+	var requestedAction = knownInstancesByDevice[normalizedDeviceId] ? 'retune' : 'start';
+	setStatus((requestedAction === 'retune' ? 'Queueing retune for device ' : 'Applying config for device ') + (config.device || '?') + '...', false);
+	postUserAction(requestedAction, config).then(function (result) {
+		if (result && result.queued) {
+			updateQueueStatusFromServer({
+				pending: Number(result.queuePosition || 0),
+				busy: false,
+				processed: 0,
+				lastProcessedAt: queueStatusState && queueStatusState.lastProcessedAt ? queueStatusState.lastProcessedAt : 0,
+				lastResult: queueStatusState && queueStatusState.lastResult ? queueStatusState.lastResult : null
+			});
+			setStatus(result.message || ('RETUNE queued for device ' + (config.device || '?') + '.'), false);
+			refreshInstances();
+			return;
+		}
+
 		setStatus(result.message || 'Started.', false);
 		knownInstancesByDevice = {};
 		for (var i = 0; i < result.instances.length; i++) {
@@ -7395,9 +9626,13 @@ function initializePage()
 		try { window.localStorage.setItem('rtlSdrTheme', nextTheme); } catch (error) {}
 	});
 
-	document.getElementById('toggleTemplateToolbarButton').addEventListener('click', function () {
-		var group = document.getElementById('templateToolbarGroup');
-		setTemplateToolbarVisible(group ? group.classList.contains('hidden') : false);
+	document.getElementById('toggleTemplateToolbarButton').addEventListener('click', openTemplateDialog);
+	document.getElementById('templateModalClose').addEventListener('click', closeTemplateDialog);
+	document.getElementById('templateModalCancel').addEventListener('click', closeTemplateDialog);
+	document.getElementById('templateModal').addEventListener('click', function (e) {
+		if (e.target === this) {
+			closeTemplateDialog();
+		}
 	});
 
 	document.getElementById('scanDevicesButton').addEventListener('click', function () {
@@ -7460,6 +9695,8 @@ function initializePage()
 			setStatus('Cannot start templates on running devices.', true);
 			return;
 		}
+
+		closeTemplateDialog();
 
 		for (var k = 0; k < startTargets.length; k++) {
 			saveDeviceConfigs(String(startTargets[k]));
@@ -7553,6 +9790,9 @@ function initializePage()
 			setStatus('Cannot apply templates to running devices.', true);
 			return;
 		}
+
+		closeTemplateDialog();
+
 		for (var k = 0; k < selectedTargets.length; k++) {
 			var changedDeviceId = String(selectedTargets[k]);
 			if (knownInstancesByDevice[changedDeviceId]) {
@@ -7566,6 +9806,23 @@ function initializePage()
 			return;
 		}
 		setStatus('Applied template "' + templateName + '" to ' + appliedCount + ' device(s).', false);
+	});
+
+	document.getElementById('deleteGlobalTemplateButton').addEventListener('click', function () {
+		var templateSelect = document.getElementById('globalTemplateSelect');
+		var templateName = templateSelect ? String(templateSelect.value || '').trim() : '';
+		if (templateName === '') {
+			setStatus('Select a template to delete.', true);
+			return;
+		}
+
+		if (!window.confirm('Delete template "' + templateName + '"?')) {
+			return;
+		}
+
+		deleteTemplateByName(templateName).catch(function (error) {
+			setStatus(error && error.message ? error.message : 'Failed to delete template.', true);
+		});
 	});
 
 	document.getElementById('exportGlobalTemplateButton').addEventListener('click', function () {
@@ -7631,14 +9888,7 @@ function initializePage()
 			saveAntennaDialog();
 		}
 	});
-
-	var templatesExpanded = null;
-	try {
-		templatesExpanded = window.localStorage.getItem('rtlSdrTemplatesExpanded');
-	} catch (error) {
-		templatesExpanded = null;
-	}
-	setTemplateToolbarVisible(templatesExpanded === '1');
+	renderQueueStatus();
 
 	Promise.all([loadUiSettingsFromServer(), loadTemplatesFromServer()]).finally(function () {
 		refreshGlobalTemplateSelector();

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ENDPOINT="${1:-http://127.0.0.1/rtl_sdr.php}"
 ACTION="${2:-list}"
+SOURCE="${3:-watchdog}"
 
 if [[ -z "${ENDPOINT}" ]]; then
 	echo "Missing endpoint URL." >&2
@@ -24,6 +25,7 @@ response="$(
 		--retry 1 \
 		--retry-delay 1 \
 		--data-urlencode "action=${ACTION}" \
+		--data-urlencode "source=${SOURCE}" \
 		"${ENDPOINT}"
 )"
 
