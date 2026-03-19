@@ -39,6 +39,70 @@ You will probably get a lot of security warnings because its a 7zip sfx.
 
 There is no uninstall, but you can right-click on the shortcut to open its location, its all one folder, easy to delete.
 
+### RTL-SDR Manager
+![](https://openstatic.org/projects/rms-cast-recorder/rtl_manage.png)
+
+I figured since this was for radio, why not make something to manage some rtl-sdrs.
+
+`php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `rms-cast-recorder` (recording), `ffmpeg` (live Icecast streaming), or both.
+
+#### What the page does
+
+* Discovers RTL-SDR dongles (index + serial aware)
+* Starts, stops, and retunes active device pipelines
+* Supports FM/WBFM/AM/USB/LSB/RAW modes
+* Supports optional DCS/CTCSS gating and bias-tee
+* Saves streaming server presets, recording upload presets, and reusable templates
+* Shows per-device logs in UI and supports log download
+* Tracks desired/running state and can auto-restart crashed pipelines with backoff
+
+#### Requirements for `rtl_sdr.php`
+
+* `rtl_fm` (`rtl-sdr` package)
+* `rms-cast-recorder` in `PATH` (required for recording and stream conditioning)
+* `ffmpeg` in `PATH` (required when stream output is enabled)
+* `curl` in `PATH` (required only for After Record upload modes)
+
+#### Quick start
+
+1. Put `php/rtl_sdr.php` on a PHP-capable web server.
+2. (Recommended) create `php/config.php` and set your recordings directory:
+
+```php
+<?php
+$recordingsRoot = '/mnt/Media/recordings';
+```
+
+3. Open the page in your browser.
+
+Local test from this repo:
+
+```bash
+$ cd php
+$ ./server.sh
+# then open http://localhost:8000/rtl_sdr.php
+```
+
+#### Runtime files created next to `rtl_sdr.php`
+
+* `rtl_sdr_state.json` / `rtl_sdr_desired_state.json` - running and desired device state
+* `rtl_sdr_logs/` - per-device launch/runtime logs
+* `streaming_servers.json` - saved Icecast targets
+* `recording_servers.json` - saved upload targets for after-record actions
+* `rtl_sdr_templates.json` - saved templates/presets
+* `rtl_sdr_ui_settings.json` - saved per-device UI settings
+
+#### Watchdog and queued retunes (recommended)
+
+Retune actions are queued and applied by watchdog ticks. For unattended operation, install the included systemd timer/service:
+
+```bash
+$ sudo ./scripts/install_rtl_sdr_watchdog.sh --endpoint http://127.0.0.1/rtl_sdr.php
+```
+
+The watchdog posts `action=list&source=watchdog` on an interval to process queued retunes and periodic state cleanup.
+
+
 ## Usage
 Basic Usage example:
 ![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
