@@ -196,8 +196,8 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
 * --stdout – write gated clips to stdout as WAV clip stream
 * --stdout-raw – write gated audio to stdout as raw PCM bytes
-* --stdout-pad – when stdout raw mode is enabled, emit silence while input stream stalls
-* --stdout-pad-delay <MS> – delay before stdout pad starts emitting silence (default `500`)
+* --stdout-pad – when stdout raw mode is enabled, output a continuous gapless stream (gated audio + silence padding); no halt at startup or mid-stream stall
+* --stdout-pad-delay <MS> – depth of the output delay buffer in ms; audio is delayed by this amount so the output stream is always continuous (default `500`)
 * --stdout-rate <HZ> – raw stdout sample rate (default matches --sample-rate)
 * --stdout-channels <N> – raw stdout channels (default matches --channels)
 * --stdout-bits <BITS> – raw stdout bit depth (default matches --bitrate)
@@ -225,9 +225,9 @@ Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endi
 
 Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdout-big-endian, --stdout-unsigned) require --stdout-raw.
 
-`--stdout-pad` requires raw stdout output (`--stdout-raw`) and emits timed silence while the input stream read is stalled.
+`--stdout-pad` requires raw stdout output (`--stdout-raw`) and emits a continuous gapless stream by maintaining a fixed-depth delay buffer (default 500 ms) pre-filled with silence.
 
-`--stdout-pad-delay` controls how long a stall must last before silence is emitted; default is `500` ms.
+`--stdout-pad-delay` sets the delay buffer depth in ms; the output stream is always delayed by this amount but never interrupted, even at startup or during input stalls.
 
 When using --dcs, output PCM bit depth must be 16 (`--bitrate 16`).
 

@@ -9,6 +9,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -424,7 +425,14 @@ public class StreamRecorder {
         long chunkStartTime = 0;
         boolean activelyRecording = false;
         int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
-        long stalledMillis = 0L;
+        // Delay buffer for stdout pad mode: pre-filled with silence so output is always continuous
+        ArrayDeque<byte[]> stdoutPadBuffer = new ArrayDeque<>();
+        if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
+            long targetBytes = Math.round(this.stdoutPadDelayMillis / 1000.0 * frameRate) * frameSize;
+            if (targetBytes > 0) {
+                stdoutPadBuffer.addLast(new byte[(int) targetBytes]);
+            }
+        }
 
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
@@ -455,19 +463,28 @@ public class StreamRecorder {
                 break;
             }
 
-            if (readResult == null) {
-                if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
-                    stalledMillis += STDOUT_READ_POLL_MILLIS;
-                    if (stalledMillis < this.stdoutPadDelayMillis) {
-                        continue;
-                    }
+            boolean noAudioData = (readResult == null);
+            if (readResult != null && readResult.error != null) {
+                throw new IOException("Audio stream read failed", readResult.error);
+            }
 
+            if (readResult != null && readResult.endOfStream) {
+                break;
+            }
+
+            if (readResult != null && (readResult.data == null || readResult.length <= 0)) {
+                noAudioData = true;
+            }
+
+            if (noAudioData) {
+                if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
                     int padBytes = padFramesPerTick * frameSize;
-                    byte[] padBuffer = new byte[padBytes];
-                    writeStdoutRaw(padBuffer, padBytes, format);
+                    byte[] padSilence = new byte[padBytes];
+                    stdoutPadBuffer.addLast(padSilence);
+                    drainStdoutPadBuffer(stdoutPadBuffer, padBytes, format);
 
                     if (activelyRecording) {
-                        chunk.write(padBuffer, 0, padBytes);
+                        chunk.write(padSilence, 0, padBytes);
                         recordedFrames += padFramesPerTick;
                     }
 
@@ -498,16 +515,6 @@ public class StreamRecorder {
                     }
                 }
                 continue;
-            }
-
-            stalledMillis = 0L;
-
-            if (readResult.error != null) {
-                throw new IOException("Audio stream read failed", readResult.error);
-            }
-
-            if (readResult.endOfStream) {
-                break;
             }
 
             int n = readResult.length;
@@ -545,7 +552,12 @@ public class StreamRecorder {
                 }
                 chunk.write(currentBuffer, 0, n);
                 if (this.stdoutEnabled && this.stdoutRawMode) {
-                    writeStdoutRaw(currentBuffer, n, format);
+                    if (this.stdoutPadMode) {
+                        stdoutPadBuffer.addLast(Arrays.copyOf(currentBuffer, n));
+                        drainStdoutPadBuffer(stdoutPadBuffer, n, format);
+                    } else {
+                        writeStdoutRaw(currentBuffer, n, format);
+                    }
                 }
                 recordedFrames += n / frameSize;
                 soundFrames += n / frameSize;
@@ -555,7 +567,12 @@ public class StreamRecorder {
                 if (activelyRecording) {
                     chunk.write(currentBuffer, 0, n);
                     if (this.stdoutEnabled && this.stdoutRawMode) {
-                        writeStdoutRaw(currentBuffer, n, format);
+                        if (this.stdoutPadMode) {
+                            stdoutPadBuffer.addLast(Arrays.copyOf(currentBuffer, n));
+                            drainStdoutPadBuffer(stdoutPadBuffer, n, format);
+                        } else {
+                            writeStdoutRaw(currentBuffer, n, format);
+                        }
                     }
                     recordedFrames += n / frameSize;
                 }
@@ -636,8 +653,8 @@ public class StreamRecorder {
                     "stdout output enabled (raw PCM): " + describeAudioFormat(targetFormat));
             if (this.stdoutPadMode) {
                 log("STDOUT", ANSI_CYAN,
-                        "stdout pad enabled: emit silence only after input stalls for "
-                                + this.stdoutPadDelayMillis + " ms.");
+                        "stdout pad enabled: " + this.stdoutPadDelayMillis
+                                + " ms delay buffer, continuous silence on stall.");
             }
         } else {
             log("STDOUT", ANSI_CYAN,
@@ -661,6 +678,21 @@ public class StreamRecorder {
             }
         } catch (IOException ioe) {
             logError("Failed to write WAV clip to stdout: " + ioe.getMessage());
+        }
+    }
+
+    private void drainStdoutPadBuffer(ArrayDeque<byte[]> buffer, int bytes, AudioFormat format) throws IOException {
+        int remaining = bytes;
+        while (remaining > 0 && !buffer.isEmpty()) {
+            byte[] head = buffer.removeFirst();
+            if (head.length <= remaining) {
+                writeStdoutRaw(head, head.length, format);
+                remaining -= head.length;
+            } else {
+                writeStdoutRaw(head, remaining, format);
+                buffer.addFirst(Arrays.copyOfRange(head, remaining, head.length));
+                remaining = 0;
+            }
         }
     }
 
