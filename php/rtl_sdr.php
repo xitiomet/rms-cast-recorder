@@ -64,10 +64,10 @@ $STREAM_FFMPEG_TCP_NODELAY = isset($STREAM_FFMPEG_TCP_NODELAY)
 	: true;
 $RMS_STDOUT_PAD_DELAY_MS = isset($RMS_STDOUT_PAD_DELAY_MS)
 	? max(0, min(5000, (int)$RMS_STDOUT_PAD_DELAY_MS))
-	: 300;
+	: 150;
 $RMS_INPUT_DEJITTER_MS = isset($RMS_INPUT_DEJITTER_MS)
 	? max(0, (int)$RMS_INPUT_DEJITTER_MS)
-	: 2000;
+	: 150;
 
 function send_json(array $payload, int $statusCode = 200): void
 {
@@ -2824,6 +2824,12 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		throw new RuntimeException('Stream bitrate must be between 16 and 320 kbps.');
 	}
 
+	$streamSampleRateValue = (int)($input['streamSampleRate'] ?? 44100);
+	$allowedStreamSampleRates = array(22050, 44100, 48000, 96000);
+	if (!in_array($streamSampleRateValue, $allowedStreamSampleRates, true)) {
+		$streamSampleRateValue = 44100;
+	}
+
 	$streamTarget = trim((string)($input['streamTarget'] ?? ''));
 	$streamMount = trim((string)($input['streamMount'] ?? ''));
 	$streamUsername = trim((string)($input['streamUsername'] ?? ''));
@@ -2978,6 +2984,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'streamEnabled' => $streamEnabled,
 		'streamFormat' => $streamFormat,
 		'streamBitrate' => $streamBitrateValue,
+		'streamSampleRate' => $streamSampleRateValue,
 		'streamTarget' => $streamTarget,
 		'streamMount' => $streamMount,
 		'streamMountLinkMode' => $streamMountLinkMode,
@@ -3102,7 +3109,7 @@ function rms_cast_recorder_supports_ctcss(): bool
 	return $supports;
 }
 
-function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0): string
+function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0): string
 {
 	$conditionerCommand = array(
 		'rms-cast-recorder',
@@ -3146,7 +3153,7 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		'--stdout',
 		'--stdout-raw',
 		'--stdout-rate',
-		(string)$sampleRate,
+		(string)($streamSampleRate > 0 ? $streamSampleRate : $sampleRate),
 		'--stdout-channels',
 		'1',
 		'--stdout-bits',
@@ -3169,11 +3176,12 @@ function build_stream_input_conditioner_command(array $config): string
 	$ctcssTone = trim((string)($config['ctcss'] ?? ''));
 	$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
 	$inputDejitterMs = get_rms_input_dejitter_ms();
+	$streamSampleRate = max(0, (int)($config['streamSampleRate'] ?? 0));
 
 	// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
 	// Threshold/silence values keep the gate effectively open while stdout pad
 	// smooths upstream rtl_fm stalls.
-	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs);
+	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs, $streamSampleRate);
 }
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
@@ -3232,13 +3240,17 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 
 	if ($enableStdout) {
 		$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
+		$stdoutSampleRate = max(0, (int)($config['streamSampleRate'] ?? 0));
+		if ($stdoutSampleRate <= 0) {
+			$stdoutSampleRate = (int)$config['rtlBandwidth'];
+		}
 
 		array_push(
 			$recorderCommand,
 			'--stdout',
 			'--stdout-raw',
 			'--stdout-rate',
-			(string)$config['rtlBandwidth'],
+			(string)$stdoutSampleRate,
 			'--stdout-channels',
 			'1',
 			'--stdout-bits',
@@ -3369,6 +3381,10 @@ function build_stream_command(array $config): string
 	$streamBitrate = max(16, min(320, (int)$config['streamBitrate']));
 	$vorbisQuality = max(0, min(10, (int)round(($streamBitrate - 32) / 32)));
 	$streamOutputUrl = build_stream_output_url($config, $streamFfmpegSettings);
+	$streamSampleRate = max(0, (int)($config['streamSampleRate'] ?? 0));
+	if ($streamSampleRate <= 0) {
+		$streamSampleRate = (int)$config['rtlBandwidth'];
+	}
 
 	$ffmpegCommand = array(
 		'ffmpeg',
@@ -3379,7 +3395,7 @@ function build_stream_command(array $config): string
 		'-f',
 		's16le',
 		'-ar',
-		(string)$config['rtlBandwidth'],
+		(string)$streamSampleRate,
 		'-ac',
 		'1',
 		'-i',
@@ -7154,6 +7170,7 @@ function getDefaultConfig(deviceId)
 		streamEnabled: false,
 		streamFormat: 'mp3',
 		streamBitrate: '128',
+		streamSampleRate: '44100',
 		streamTarget: '127.0.0.1:8000',
 		streamMount: '/rtl-sdr.mp3',
 		streamMountLinkMode: 'name',
@@ -7426,6 +7443,7 @@ function buildPipelineStagePreviewLines(config)
 	var followName = mountLinkMode === 'name';
 	var mount = normalizeMountByFormat(source.streamMount, streamName, streamFormat, followName, followDevice, deviceIndex);
 
+	var streamSampleRate = (['22050', '44100', '48000'].indexOf(String(source.streamSampleRate || '')) !== -1) ? String(source.streamSampleRate) : '44100';
 	var rtlLine = 'rtl_fm';
 	var frequency = String(source.frequency || '').trim();
 	if (frequency !== '') {
@@ -7454,6 +7472,7 @@ function buildPipelineStagePreviewLines(config)
 			recorderBothLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
 		}
 		recorderBothLine += ' --stdout-pad';
+		recorderBothLine += ' --stdout-rate ' + streamSampleRate;
 		recorderBothLine += ' -t ' + String(source.threshold || '-40');
 		recorderBothLine += ' -s ' + String(source.silence || '2');
 		if (dcsCode !== '') {
@@ -7469,6 +7488,7 @@ function buildPipelineStagePreviewLines(config)
 			conditionerLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
 		}
 		conditionerLine += ' --stdout-pad';
+		conditionerLine += ' --stdout-rate ' + streamSampleRate;
 		if (dcsCode !== '') {
 			conditionerLine += ' --dcs ' + dcsCode;
 		}
@@ -7506,7 +7526,7 @@ function buildPipelineStagePreviewLines(config)
 		var destination = streamTarget !== ''
 			? ('icecast://' + authPrefix + streamTarget + mount)
 			: ('icecast://<target>' + mount);
-		lines.push('ffmpeg -hide_banner -loglevel warning -nostats -f s16le -ar ' + rtlBandwidth + ' -ac 1 -i pipe:0 -vn -b:a ' + bitrate + 'k -c:a ' + codec + ' -f ' + streamFormat + ' ' + destination);
+		lines.push('ffmpeg -hide_banner -loglevel warning -nostats -f s16le -ar ' + streamSampleRate + ' -ac 1 -i pipe:0 -vn -b:a ' + bitrate + 'k -c:a ' + codec + ' -f ' + streamFormat + ' ' + destination);
 	}
 
 	return lines;
@@ -8141,6 +8161,7 @@ function getConfigForDevice(deviceId)
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamBitrate = String(merged.streamBitrate || '128');
+	merged.streamSampleRate = (['22050', '44100', '48000','96000'].indexOf(String(merged.streamSampleRate || '')) !== -1) ? String(merged.streamSampleRate) : '44100';
 	merged.streamTarget = String(merged.streamTarget || '127.0.0.1:8000');
 	merged.streamName = String(merged.streamName || '');
 	var inferredMountFollowName = inferMountFollowsStreamName(merged.streamMount, merged.streamName, merged.streamFormat);
@@ -8607,6 +8628,17 @@ function renderDeviceList()
 							'<option value="raw">RAW</option>' +
 						'</select></div>' +
 					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>RTL Bandwidth</label><select class="field-rtl-bandwidth">' +
+							'<option value="3000">3 kHz</option>' +
+							'<option value="6000">6 kHz</option>' +
+							'<option value="12000">12 kHz</option>' +
+							'<option value="24000">24 kHz</option>' +
+							'<option value="48000">48 kHz</option>' +
+							'<option value="96000">96 kHz</option>' +
+							'<option value="170000">170 kHz</option>' +
+						'</select></div>' +
+					'</div>' +
 					'<div class="form-row">' +
 						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
 						'<div><label>Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
@@ -8616,15 +8648,6 @@ function renderDeviceList()
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>CTCSS Gate</label><select class="field-ctcss">' + buildCtcssOptions(String(config.ctcss || '')) + '</select></div>' +
-					'</div>' +
-					'<div class="form-row single">' +
-						'<div><label>RTL Bandwidth</label><select class="field-rtl-bandwidth">' +
-							'<option value="12000">12,000 Hz</option>' +
-							'<option value="24000">24,000 Hz</option>' +
-							'<option value="48000">48,000 Hz</option>' +
-							'<option value="96000">96,000 Hz</option>' +
-							'<option value="170000">170,000 Hz</option>' +
-						'</select></div>' +
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>Bias-T</label><select class="field-bias-t"><option value="0">Disabled</option><option value="1">Enabled</option></select></div>' +
@@ -8639,10 +8662,13 @@ function renderDeviceList()
 					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
 						'<div><label>Stream Format</label><select class="field-stream-format"><option value="mp3">mp3</option><option value="ogg">ogg</option></select></div>' +
-						'<div><label>Bitrate (kbps)</label><input type="number" min="16" max="320" step="1" class="field-stream-bitrate" value="' + escapeHtml(String(config.streamBitrate || '128')) + '"></div>' +
+						'<div><label>Stream Bitrate (kbps)</label><input type="number" min="16" max="320" step="1" class="field-stream-bitrate" value="' + escapeHtml(String(config.streamBitrate || '128')) + '"></div>' +
+					'</div>' +
+					'<div class="form-row single output-stream-only hidden">' +
+						'<div><label>Stream Sample Rate</label><select class="field-stream-sample-rate"><option value="22050">22050 Hz</option><option value="44100">44100 Hz</option><option value="48000">48000 Hz</option><option value="96000">96000 Hz</option></select></div>' +
 					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
-						'<div style="flex: 1;"><label>Target Server</label><select class="field-stream-server-id">' + buildStreamServerOptions(String(config.streamServerId || '')) + '</select></div>' +
+						'<div style="flex: 1;"><label>Target Icecast Server</label><select class="field-stream-server-id">' + buildStreamServerOptions(String(config.streamServerId || '')) + '</select></div>' +
 						'<div style="flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end;"><button type="button" class="refresh-button action-edit-server" style="padding: 6px 12px;">Edit</button><button type="button" class="refresh-button action-new-server" style="padding: 6px 12px;">New</button></div>' +
 					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
@@ -8667,7 +8693,7 @@ function renderDeviceList()
 						'<div><button type="button" class="refresh-button action-save-template">Save Template</button></div>' +
 					'</div>' +
 					'<div class="form-row single template-button-row">' +
-						'<div><button type="button" class="refresh-button primary action-save-template-start">Save Template + Start</button></div>' +
+						'<div><button type="button" class="refresh-button primary action-save-template-start">' + (isRunning ? 'Save Template + Retune' : 'Save Template + Start') + '</button></div>' +
 					'</div>' +
 					'<div class="form-row single template-button-row">' +
 						'<div><button type="button" class="refresh-button action-save-template-as">Save Template As...</button></div>' +
@@ -8915,6 +8941,7 @@ function readCardConfig(card)
 		silence: card.querySelector('.field-silence').value.trim(),
 		streamFormat: streamFormat,
 		streamBitrate: card.querySelector('.field-stream-bitrate').value.trim(),
+		streamSampleRate: card.querySelector('.field-stream-sample-rate') ? card.querySelector('.field-stream-sample-rate').value.trim() : '44100',
 		streamTarget: streamTarget,
 		streamMount: streamMount,
 		streamMountLinkMode: requestedMountLinkMode,
@@ -9136,6 +9163,10 @@ function bindDeviceCard(card)
 		streamEnabledCheckbox.checked = storedOutputSelection.streamEnabled;
 	}
 	streamFormatSelect.value = storedConfig.streamFormat || 'mp3';
+	var streamSampleRateSelect = card.querySelector('.field-stream-sample-rate');
+	if (streamSampleRateSelect) {
+		streamSampleRateSelect.value = String(storedConfig.streamSampleRate || '44100');
+	}
 	if (streamMountLinkModeSelect) {
 		streamMountLinkModeSelect.value = resolveMountLinkModeForConfig(storedConfig, storedConfig.deviceIndex || getDeviceIndexForId(deviceId));
 	}
@@ -9363,6 +9394,7 @@ function bindDeviceCard(card)
 
 	var saveTemplateStartButton = card.querySelector('.action-save-template-start');
 	if (saveTemplateStartButton) {
+		saveTemplateStartButton.textContent = knownInstancesByDevice[deviceId] ? 'Save Template + Retune' : 'Save Template + Start';
 		saveTemplateStartButton.addEventListener('click', function () {
 			saveTemplateFromCard(true);
 		});

@@ -14,7 +14,7 @@ A recording will be created as follows:
 
 Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.org/projects/rms-cast-recorder/#downloads) (scroll to the bottom)
 
-### Optional PHP Interface
+### PHP Recordings Browser
 ![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
 In the subdirectory php of this project is a web interface for browsing and reviewing the recordings. 
 All you need is a php capable web server. The php requirements are:
@@ -39,7 +39,7 @@ You will probably get a lot of security warnings because its a 7zip sfx.
 
 There is no uninstall, but you can right-click on the shortcut to open its location, its all one folder, easy to delete.
 
-### RTL-SDR Manager
+### PHP RTL-SDR Manager
 ![](https://openstatic.org/projects/rms-cast-recorder/rtl_manage.png)
 
 I figured since this was for radio, why not make something to manage some rtl-sdrs.
