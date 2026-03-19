@@ -136,14 +136,13 @@ public class RadioPipeMain
             URL url = hasUrl ? new URL(cmd.getOptionValue("u")) : null;
             boolean hasOutDir = cmd.hasOption("o");
             Path outDir = null;
+            ResolvedRecordingsDirectory resolvedRecordingsDirectory = null;
             if (!useStdout || hasOutDir) {
-                String requestedOutDir = cmd.getOptionValue("o");
-                String resolvedOutDir = !isBlank(requestedOutDir)
-                        ? requestedOutDir
-                        : resolveDefaultRecordingsDirectory();
-                outDir = Paths.get(resolvedOutDir);
+                resolvedRecordingsDirectory = resolveRecordingsDirectory(cmd.getOptionValue("o"));
+                outDir = Paths.get(resolvedRecordingsDirectory.directory);
                 Files.createDirectories(outDir);
             }
+            logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, hasOutDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
             float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
@@ -352,18 +351,56 @@ public class RadioPipeMain
         return parsed;
     }
 
-    private static String resolveDefaultRecordingsDirectory()
+    private static ResolvedRecordingsDirectory resolveRecordingsDirectory(String requestedOutDir)
     {
+        if (!isBlank(requestedOutDir)) {
+            return new ResolvedRecordingsDirectory(requestedOutDir.trim(), "command line option -o/--out");
+        }
+
         String envOutDir = System.getenv("RADIOPIPE_RECORDINGS");
         if (!isBlank(envOutDir)) {
-            return envOutDir.trim();
+            return new ResolvedRecordingsDirectory(envOutDir.trim(), "environment variable RADIOPIPE_RECORDINGS");
         }
-        return "./recordings";
+        return new ResolvedRecordingsDirectory("./recordings", "built-in default");
+    }
+
+    private static void logRecordingsDirectorySelection(Path outDir,
+                                                        ResolvedRecordingsDirectory resolvedRecordingsDirectory,
+                                                        boolean useStdout,
+                                                        boolean hasOutDir)
+    {
+        if (outDir == null) {
+            if (useStdout && !hasOutDir) {
+                System.err.println("startup: file recording disabled (stdout-only mode: --stdout without -o)");
+            } else {
+                System.err.println("startup: file recording disabled (no recordings directory configured)");
+            }
+            return;
+        }
+
+        String source = (resolvedRecordingsDirectory == null)
+                ? "unknown"
+                : resolvedRecordingsDirectory.source;
+        System.err.println("startup: recordings directory = "
+                + outDir.toAbsolutePath().normalize()
+                + " (source: "
+                + source
+                + ")");
     }
 
     private static boolean isBlank(String value)
     {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static final class ResolvedRecordingsDirectory {
+        private final String directory;
+        private final String source;
+
+        private ResolvedRecordingsDirectory(String directory, String source) {
+            this.directory = directory;
+            this.source = source;
+        }
     }
 
     public static void showHelp(Options options)
