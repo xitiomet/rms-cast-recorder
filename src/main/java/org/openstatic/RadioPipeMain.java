@@ -3,6 +3,7 @@ package org.openstatic;
 import org.apache.commons.cli.*;
 import javax.sound.sampled.AudioFormat;
 
+import java.net.InetSocketAddress;
 import java.net.URL;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -16,6 +17,7 @@ public class RadioPipeMain
     public static void main(String[] args)
     {
         CommandLine cmd = null;
+        ApiWebSocketServer apiWebSocketServer = null;
         Options options = new Options();
         CommandLineParser parser = new DefaultParser();
 
@@ -79,6 +81,8 @@ public class RadioPipeMain
             .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
         options.addOption(Option.builder().longOpt("gate-hold").hasArg().argName("SECONDS")
             .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 0)").build());
+        options.addOption(Option.builder().longOpt("api-websocket").hasArg().argName("HOST:PORT")
+            .desc("Enable websocket API server at host:port (example: 0.0.0.0:9000)").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -152,6 +156,7 @@ public class RadioPipeMain
             String streamNameOverride = cmd.getOptionValue("n");
             Integer dcsCode = cmd.hasOption("dcs") ? parseDcsCode(cmd.getOptionValue("dcs")) : null;
             Double ctcssToneHz = cmd.hasOption("ctcss") ? parseCtcssTone(cmd.getOptionValue("ctcss")) : null;
+            String apiWebSocketBinding = cmd.getOptionValue("api-websocket");
             long inputDejitterMs;
             try {
                 inputDejitterMs = Long.parseLong(cmd.getOptionValue("input-dejitter", "250"));
@@ -192,6 +197,16 @@ public class RadioPipeMain
             }
             if (outDir == null && onWriteProgram != null) {
                 throw new ParseException("--on-write requires file recording; provide -o when using --stdout");
+            }
+
+            if (!isBlank(apiWebSocketBinding)) {
+                InetSocketAddress bindAddress = parseApiWebSocketAddress(apiWebSocketBinding);
+                apiWebSocketServer = new ApiWebSocketServer(bindAddress);
+                apiWebSocketServer.start();
+                System.err.println("startup: websocket api = ws://"
+                        + bindAddress.getHostString()
+                        + ":"
+                        + bindAddress.getPort());
             }
 
             if (stdoutRaw) {
@@ -300,7 +315,14 @@ public class RadioPipeMain
             recorder.setInputDejitterMillis(inputDejitterMs);
             recorder.setGateHoldSeconds(gateHoldSeconds);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
-            Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
+            recorder.setApiWebSocketServer(apiWebSocketServer);
+            final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                recorder.stop();
+                if (shutdownApiWebSocketServer != null) {
+                    shutdownApiWebSocketServer.shutdownQuietly();
+                }
+            }));
             recorder.run();
 
         } catch (ParseException e) {
@@ -309,7 +331,44 @@ public class RadioPipeMain
         } catch (Exception e) {
             System.err.println("fatal: " + e);
             e.printStackTrace(System.err);
+        } finally {
+            if (apiWebSocketServer != null) {
+                apiWebSocketServer.shutdownQuietly();
+            }
         }
+    }
+
+    private static InetSocketAddress parseApiWebSocketAddress(String bindingValue) throws ParseException
+    {
+        if (isBlank(bindingValue)) {
+            throw new ParseException("api-websocket must be in host:port format");
+        }
+
+        String normalized = bindingValue.trim();
+        int separator = normalized.lastIndexOf(':');
+        if (separator <= 0 || separator == normalized.length() - 1) {
+            throw new ParseException("api-websocket must be in host:port format (example: 0.0.0.0:9000)");
+        }
+
+        String host = normalized.substring(0, separator).trim();
+        String portText = normalized.substring(separator + 1).trim();
+
+        if (host.isEmpty()) {
+            throw new ParseException("api-websocket host must not be empty");
+        }
+
+        int port;
+        try {
+            port = Integer.parseInt(portText);
+        } catch (NumberFormatException nfe) {
+            throw new ParseException("api-websocket port must be an integer between 1 and 65535");
+        }
+
+        if (port < 1 || port > 65535) {
+            throw new ParseException("api-websocket port must be between 1 and 65535");
+        }
+
+        return new InetSocketAddress(host, port);
     }
 
     private static int parseDcsCode(String dcsValue) throws ParseException

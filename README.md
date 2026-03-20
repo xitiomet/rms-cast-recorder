@@ -10,6 +10,7 @@ Built for unattended logging, RadioPipe stores WAV clips in date-based folders a
 * Accepts stream URLs (`--url`) or piped audio (`--stdin`, including raw PCM)
 * Supports optional DCS/CTCSS gating for tone/code-controlled recording
 * Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
+* Can publish real-time recorder events over WebSocket (`--api-websocket host:port`)
 * Writes date-organized clips with stream metadata and timestamped filenames
 * Supports post-write automation hooks (`--on-write`) for conversion/upload workflows
 * Includes PHP tools for browsing recordings and managing RTL-SDR pipelines
@@ -160,6 +161,17 @@ $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
     --stdout-rate 8000 --stdout-channels 1 --stdout-bits 16 \
   | your-program-that-reads-raw-pcm
 ```
+
+websocket API example (publish gate/hook events to clients):
+```bash
+$ ./radio-pipe \
+      -u http://example.com:8000/stream.mp3 \
+      -o ./recordings \
+      --dcs 073 \
+      --api-websocket 0.0.0.0:9000
+```
+
+See `websocket.MD` for event details and examples.
 ## Sample Scripts
 
 The `scripts/` directory contains helper scripts for converting recorded WAV files to compressed formats. All scripts require `exiftool` (`sudo apt install -y libimage-exiftool-perl`) to preserve the stream title and comment metadata during conversion.
@@ -273,6 +285,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
 * **Naming/automation**: `-n`, `-x`
+* **WebSocket API**: `--api-websocket`
 
 * -u,--url <URL> – stream URL to capture (mutually exclusive with --stdin)
 * -i,--stdin – read audio from stdin (mutually exclusive with --url)
@@ -302,6 +315,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
+* --api-websocket <HOST:PORT> – start embedded websocket API server and publish recorder events (example `0.0.0.0:9000`)
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
