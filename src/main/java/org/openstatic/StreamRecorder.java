@@ -587,7 +587,7 @@ public class StreamRecorder {
                         log("SILENCE", ANSI_YELLOW,
                                 String.format("Silence reached after %.1f s, closing clip.",
                                         recordedFrames / frameRate));
-                        publishEvent("silence_detected");
+                        publishEvent("silenceDetected");
                         byte[] clipAudio = chunk.toByteArray();
                         double soundSeconds = soundFrames / frameRate;
                         if (soundSeconds > 1.0) {
@@ -676,13 +676,13 @@ public class StreamRecorder {
                     log("DCS", ANSI_GREEN,
                             "DCS " + this.requiredDcsLabel + " detected ("
                                     + dcsGateDetector.getPolarityLabel() + "), gate open.");
-                    publishEvent("dcs_detected",
+                        publishEvent("dcsDetected",
                             "dcs", this.requiredDcsLabel,
                             "polarity", dcsGateDetector.getPolarityLabel());
                 } else {
                     log("DCS", ANSI_YELLOW,
                             "DCS " + this.requiredDcsLabel + " no longer detected, gate closed.");
-                    publishEvent("dcs_gone",
+                    publishEvent("dcsGone",
                             "dcs", this.requiredDcsLabel,
                             "polarity", dcsGateDetector.getPolarityLabel());
                 }
@@ -692,12 +692,12 @@ public class StreamRecorder {
                 if (ctcssGateOpen) {
                     log("CTCSS", ANSI_GREEN,
                             "CTCSS " + this.requiredCtcssLabel + " detected, gate open.");
-                    publishEvent("ctcss_detected",
+                        publishEvent("ctcssDetected",
                             "ctcss", this.requiredCtcssLabel);
                 } else {
                     log("CTCSS", ANSI_YELLOW,
                             "CTCSS " + this.requiredCtcssLabel + " no longer detected, gate closed.");
-                    publishEvent("ctcss_gone",
+                    publishEvent("ctcssGone",
                             "ctcss", this.requiredCtcssLabel);
                 }
             }
@@ -720,9 +720,9 @@ public class StreamRecorder {
             boolean currentGateOpen = (currentGateBlockReason == null);
             if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
                 if (currentGateOpen) {
-                    publishEvent("gate_open", "reason", (statusGateReason == null) ? "none" : statusGateReason);
+                    publishEvent("gateOpen", "reason", (statusGateReason == null) ? "none" : statusGateReason);
                 } else {
-                    publishEvent("gate_closed", "reason", currentGateBlockReason);
+                    publishEvent("gateClosed", "reason", currentGateBlockReason);
                 }
                 statusGateOpen = currentGateOpen;
                 statusGateReason = currentGateBlockReason;
@@ -776,7 +776,7 @@ public class StreamRecorder {
                     chunkStartTime = System.currentTimeMillis();
                     log("RECORD", ANSI_GREEN,
                             "Audio detected, starting clip for stream " + streamLabel + ".");
-                    publishEvent("audio_detected");
+                    publishEvent("audioDetected");
                 }
                 chunk.write(currentBuffer, 0, n);
                 recordedFrames += n / frameSize;
@@ -793,7 +793,7 @@ public class StreamRecorder {
                     log("SILENCE", ANSI_YELLOW,
                             String.format("Silence reached after %.1f s, closing clip.",
                                     recordedFrames / frameRate));
-                    publishEvent("silence_detected");
+                    publishEvent("silenceDetected");
                     byte[] clipAudio = chunk.toByteArray();
                     double soundSeconds = soundFrames / frameRate;
                     if (soundSeconds > 1.0) { // only keep clips that have at least 1 second of sound
@@ -1169,7 +1169,7 @@ public class StreamRecorder {
         Thread hookThread = new Thread(() -> {
             try {
                 List<String> command = buildHookCommand(wavFile);
-                publishEvent("hook_executed", "command", String.join(" ", command));
+                publishEvent("hookExecuted", "command", String.join(" ", command));
                 ProcessBuilder pb = new ProcessBuilder(command);
                 pb.redirectErrorStream(true);
                 Process process = pb.start();
@@ -1178,7 +1178,7 @@ public class StreamRecorder {
                     String line;
                     while ((line = outputReader.readLine()) != null) {
                         log("HOOK", ANSI_BLUE, line);
-                        publishEvent("hook_result", "result", line);
+                        publishEvent("hookResult", "result", line);
                     }
                 }
 
@@ -1189,10 +1189,10 @@ public class StreamRecorder {
                     log("HOOK", ANSI_YELLOW,
                             "Exited with code " + exitCode + " for " + wavFile);
                 }
-                publishEvent("hook_result", "result", "exit_code=" + exitCode);
+                publishEvent("hookResult", "result", "exitCode=" + exitCode);
             } catch (Exception e) {
                 logError("on-write execution failed for " + wavFile + ": " + e.getMessage());
-                publishEvent("hook_result", "result", "error: " + e.getMessage());
+                publishEvent("hookResult", "result", "error: " + e.getMessage());
             }
         }, "on-write-hook");
         hookThread.setDaemon(true);
@@ -1379,29 +1379,31 @@ public class StreamRecorder {
         long pidValue = ProcessHandle.current().pid();
         ApiWebSocketServer wsServer = this.apiWebSocketServer;
         int apiPortValue = (wsServer != null) ? wsServer.getAddress().getPort() : 0;
+        boolean recordingEnabledValue = (baseDir != null);
         String recordingsPathValue = (baseDir != null) ? baseDir.toAbsolutePath().toString() : null;
         double gateSecondsValue = Double.parseDouble(formatDurationSeconds(gateSinceNanos, nowNanos));
         double audioDetectedSecondsValue = Double.parseDouble(formatDurationSeconds(audioDetectedSinceNanos, nowNanos));
         publishEvent("status",
-                "stream_name", streamName,
+            "streamName", streamName,
                 "source", sourceValue,
+                "recordingEnabled", recordingEnabledValue,
                 "recordingsPath", recordingsPathValue,
                 "pid", pidValue,
-                "api_port", apiPortValue,
-                "dcs_gate_enabled", String.valueOf(dcsGateEnabled),
+            "apiPort", apiPortValue,
+            "dcsGateEnabled", dcsGateEnabled,
                 "dcs", currentDcsLabel,
-                "dcs_polarity", currentDcsPolarity,
-                "dcs_gate", dcsGateOpen ? "open" : "closed",
-                "ctcss_gate_enabled", String.valueOf(ctcssGateEnabled),
+            "dcsPolarity", currentDcsPolarity,
+            "dcsGate", dcsGateOpen ? "open" : "closed",
+            "ctcssGateEnabled", ctcssGateEnabled,
                 "ctcss", currentCtcssLabel,
-                "ctcss_gate", ctcssGateOpen ? "open" : "closed",
-                "rms_gate", rmsGateOpen ? "open" : "closed",
-                "rms_db", Math.round(rmsDb * 10.0) / 10.0,
+            "ctcssGate", ctcssGateOpen ? "open" : "closed",
+            "rmsGate", rmsGateOpen ? "open" : "closed",
+            "rmsDb", Math.round(rmsDb * 10.0) / 10.0,
                 "gate", gateOpen ? "open" : "closed",
-                "gate_reason", gateReasonValue,
-                "gate_seconds", gateSecondsValue,
-                "audio_detected", String.valueOf(audioDetected),
-                "audio_detected_seconds", audioDetectedSecondsValue);
+            "gateReason", gateReasonValue,
+            "gateSeconds", gateSecondsValue,
+            "audioDetected", audioDetected,
+            "audioDetectedSeconds", audioDetectedSecondsValue);
         return nowNanos + TimeUnit.MILLISECONDS.toNanos(250L);
     }
 

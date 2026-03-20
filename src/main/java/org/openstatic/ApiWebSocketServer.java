@@ -102,7 +102,7 @@ public final class ApiWebSocketServer extends WebSocketServer {
             json.append(",\"").append(escapeJson(key)).append("\":");
             if (valueObj == null) {
                 json.append("null");
-            } else if (valueObj instanceof Number) {
+            } else if (valueObj instanceof Number || valueObj instanceof Boolean) {
                 json.append(valueObj);
             } else {
                 String value = valueObj.toString();
