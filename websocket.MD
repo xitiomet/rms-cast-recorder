@@ -153,7 +153,7 @@ Examples:
 ### Status (every 250ms)
 
 ```json
-{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400123,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"normal","dcsGate":"open","ctcssGateEnabled":true,"ctcss":"100.0","ctcssGate":"open","rmsGate":"closed","rmsDb":-15.3,"gate":"closed","gateReason":"silence","gateSeconds":1.002,"audioDetected":false,"audioDetectedSeconds":1.002,"audioReason":[]}
+{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400123,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"normal","dcsGate":"open","ctcssGateEnabled":true,"ctcss":"100.0","ctcssGate":"open","rmsGate":"closed","rmsDb":-15.3,"outputDb":-100.0,"gate":"closed","gateReason":"silence","gateSeconds":1.002,"audioDetected":false,"audioDetectedSeconds":1.002,"audioReason":[]}
 ```
 
 Sent every 250 milliseconds while the recorder is running.
@@ -175,6 +175,7 @@ Fields:
 - `ctcssGate`: `open` or `closed`
 - `rmsGate`: RMS/silence gate (`open` when audio is loud enough, `closed` when silent)
 - `rmsDb`: current RMS level in decibels (dB)
+- `outputDb`: RMS level after all gates. Equals `rmsDb` when audio passes all gates; otherwise `-100.0`
 - `gate`: overall gate state (open only if all gates open)
 - `gateReason`: blocker for overall gate (`dcs`, `ctcss`, `silence`, or `none` when open)
 - `gateSeconds`: seconds since the overall gate entered its current state
@@ -208,13 +209,13 @@ Live detection continues to populate status packets even when DCS or CTCSS gatin
 Ungated DCS decode:
 
 ```json
-{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400456,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"inverted","dcsGate":"open","ctcssGateEnabled":false,"ctcss":null,"ctcssGate":"open","rmsGate":"open","rmsDb":-14.8,"gate":"open","gateReason":"none","gateSeconds":0.250,"audioDetected":true,"audioDetectedSeconds":0.250,"audioReason":["dcs","ctcss","rms"]}
+{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400456,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"inverted","dcsGate":"open","ctcssGateEnabled":false,"ctcss":null,"ctcssGate":"open","rmsGate":"open","rmsDb":-14.8,"outputDb":-14.8,"gate":"open","gateReason":"none","gateSeconds":0.250,"audioDetected":true,"audioDetectedSeconds":0.250,"audioReason":["dcs","ctcss","rms"]}
 ```
 
 Ungated CTCSS decode:
 
 ```json
-{"event":"status","streamName":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400789,"dcsGateEnabled":false,"dcs":null,"dcsPolarity":null,"dcsGate":"open","ctcssGateEnabled":false,"ctcss":"100.0","ctcssGate":"open","rmsGate":"open","rmsDb":-17.1,"gate":"open","gateReason":"none","gateSeconds":0.500,"audioDetected":true,"audioDetectedSeconds":0.500,"audioReason":["dcs","ctcss","rms"]}
+{"event":"status","streamName":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400789,"dcsGateEnabled":false,"dcs":null,"dcsPolarity":null,"dcsGate":"open","ctcssGateEnabled":false,"ctcss":"100.0","ctcssGate":"open","rmsGate":"open","rmsDb":-17.1,"outputDb":-17.1,"gate":"open","gateReason":"none","gateSeconds":0.500,"audioDetected":true,"audioDetectedSeconds":0.500,"audioReason":["dcs","ctcss","rms"]}
 ```
 
 ## Notes

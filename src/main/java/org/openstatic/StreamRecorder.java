@@ -453,6 +453,7 @@ public class StreamRecorder {
         boolean statusRmsGateOpen = true;  // will be updated on first frame
         long statusRmsGateSinceNanos = statusClockNanos;
         double statusRmsDb = 0.0;  // current RMS level in dB
+        double statusOutputDb = -100.0; // RMS level after all gates
         boolean statusGateOpen = false;
         String statusGateReason = "silence";
         long statusGateSinceNanos = statusClockNanos;
@@ -609,6 +610,7 @@ public class StreamRecorder {
                         silentFrames = 0;
                     }
                 }
+                statusOutputDb = -100.0;
                 long idleNowNanos = System.nanoTime();
                 nextStatusEmitNanos = publishStatusIfDue(
                         idleNowNanos,
@@ -622,6 +624,7 @@ public class StreamRecorder {
                         statusRmsGateOpen,
                         statusRmsGateSinceNanos,
                         statusRmsDb,
+                        statusOutputDb,
                         statusGateOpen,
                         statusGateReason,
                         statusGateSinceNanos,
@@ -730,6 +733,7 @@ public class StreamRecorder {
             }
 
             boolean gateAllowsAudio = !isSilent && dcsMatch && ctcssMatch;
+            statusOutputDb = gateAllowsAudio ? currentRmsDb : -100.0;
             if (statusAudioDetected != gateAllowsAudio) {
                 statusAudioDetected = gateAllowsAudio;
                 statusAudioDetectedSinceNanos = nowNanos;
@@ -746,6 +750,7 @@ public class StreamRecorder {
                     statusRmsGateOpen,
                     statusRmsGateSinceNanos,
                     statusRmsDb,
+                    statusOutputDb,
                     statusGateOpen,
                     statusGateReason,
                     statusGateSinceNanos,
@@ -1359,6 +1364,7 @@ public class StreamRecorder {
                                     boolean rmsGateOpen,
                                     long rmsGateSinceNanos,
                                     double rmsDb,
+                                    double outputDb,
                                     boolean gateOpen,
                                     String gateReason,
                                     long gateSinceNanos,
@@ -1413,6 +1419,7 @@ public class StreamRecorder {
                 "ctcssGate", ctcssGateOpen ? "open" : "closed",
                 "rmsGate", rmsGateOpen ? "open" : "closed",
                 "rmsDb", Math.round(rmsDb * 10.0) / 10.0,
+                "outputDb", Math.round(outputDb * 10.0) / 10.0,
                 "gate", gateOpen ? "open" : "closed",
                 "gateReason", gateReasonValue,
                 "gateSeconds", gateSecondsValue,
