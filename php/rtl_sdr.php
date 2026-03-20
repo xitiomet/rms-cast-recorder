@@ -2192,9 +2192,21 @@ function command_exists(string $command): bool
 	return trim((string)$lookup) !== '';
 }
 
+function current_process_in_group(string $groupName): bool
+{
+	if (!function_exists('posix_getgrnam') || !function_exists('posix_getgroups')) {
+		return false;
+	}
+	$grpInfo = posix_getgrnam($groupName);
+	if (!is_array($grpInfo) || !isset($grpInfo['gid'])) {
+		return false;
+	}
+	return in_array((int)$grpInfo['gid'], posix_getgroups(), true);
+}
+
 function wrap_for_device_access(string $command): string
 {
-	if (command_exists('sg')) {
+	if (command_exists('sg') && !current_process_in_group('plugdev')) {
 		return 'sg plugdev -c ' . escapeshellarg($command);
 	}
 
