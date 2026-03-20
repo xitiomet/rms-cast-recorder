@@ -597,6 +597,17 @@ function execute_queued_stream_action_item(array $item, array &$state, array &$d
 		if ($stopStartDelayUs > 0) {
 			usleep($stopStartDelayUs);
 		}
+	} elseif ($action === 'retune') {
+		// For retune, use force release as fallback if device not found in state
+		// This ensures the device is stopped even if state is out of sync
+		$deviceIndex = normalize_device_index((string)($config['deviceIndex'] ?? $deviceId));
+		if ($deviceIndex !== '') {
+			force_release_device($deviceIndex);
+			usleep(500000);
+		}
+		if ($stopStartDelayUs > 0) {
+			usleep($stopStartDelayUs);
+		}
 	}
 
 	$startResult = start_instance($config, $logDir);
@@ -1105,7 +1116,17 @@ function merge_running_state_into_device_configs(array $deviceConfigs, array $st
 		}
 
 		$instanceConfig['device'] = $deviceId;
-		$merged[$deviceId] = $instanceConfig;
+		$existingConfig = isset($merged[$deviceId]) && is_array($merged[$deviceId])
+			? $merged[$deviceId]
+			: array();
+
+		if (count($existingConfig) === 0) {
+			$merged[$deviceId] = $instanceConfig;
+			continue;
+		}
+
+		$existingConfig['device'] = $deviceId;
+		$merged[$deviceId] = array_merge($instanceConfig, $existingConfig);
 	}
 
 	return $merged;
@@ -8846,6 +8867,298 @@ function parseImportedTemplatesPayload(rawValue)
 	return importedByName;
 }
 
+function normalizeImportedStreamServers(rawServers)
+{
+	var normalized = {};
+	if (!rawServers || typeof rawServers !== 'object' || Array.isArray(rawServers)) {
+		return normalized;
+	}
+
+	for (var rawId in rawServers) {
+		if (!Object.prototype.hasOwnProperty.call(rawServers, rawId)) {
+			continue;
+		}
+
+		var server = rawServers[rawId];
+		if (!server || typeof server !== 'object' || Array.isArray(server)) {
+			continue;
+		}
+
+		var name = String(server.name || '').trim();
+		var target = String(server.target || '').trim();
+		if (name === '' || target === '') {
+			continue;
+		}
+
+		normalized[String(rawId)] = {
+			name: name,
+			target: target,
+			username: String(server.username || ''),
+			password: String(server.password || '')
+		};
+	}
+
+	return normalized;
+}
+
+function normalizeImportedRecordingServers(rawServers)
+{
+	var normalized = {};
+	if (!rawServers || typeof rawServers !== 'object' || Array.isArray(rawServers)) {
+		return normalized;
+	}
+
+	for (var rawId in rawServers) {
+		if (!Object.prototype.hasOwnProperty.call(rawServers, rawId)) {
+			continue;
+		}
+
+		var server = rawServers[rawId];
+		if (!server || typeof server !== 'object' || Array.isArray(server)) {
+			continue;
+		}
+
+		var name = String(server.name || '').trim();
+		var url = String(server.url || '').trim();
+		if (name === '' || url === '') {
+			continue;
+		}
+
+		normalized[String(rawId)] = {
+			name: name,
+			url: url,
+			username: String(server.username || ''),
+			password: String(server.password || '')
+		};
+	}
+
+	return normalized;
+}
+
+function parseImportedServerBundles(rawValue)
+{
+	var payload = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+		? rawValue
+		: {};
+
+	var rawStreamServers = null;
+	if (payload.streamingServers && typeof payload.streamingServers === 'object' && !Array.isArray(payload.streamingServers)) {
+		rawStreamServers = payload.streamingServers;
+	} else if (payload.streamServers && typeof payload.streamServers === 'object' && !Array.isArray(payload.streamServers)) {
+		rawStreamServers = payload.streamServers;
+	}
+
+	var rawRecordingServers = null;
+	if (payload.recordingServers && typeof payload.recordingServers === 'object' && !Array.isArray(payload.recordingServers)) {
+		rawRecordingServers = payload.recordingServers;
+	}
+
+	return {
+		streamingServers: normalizeImportedStreamServers(rawStreamServers),
+		recordingServers: normalizeImportedRecordingServers(rawRecordingServers)
+	};
+}
+
+function findMatchingStreamServerId(serverConfig)
+{
+	var target = String(serverConfig && serverConfig.target ? serverConfig.target : '').trim();
+	if (target === '') {
+		return '';
+	}
+	var username = String(serverConfig && serverConfig.username ? serverConfig.username : '');
+	var password = String(serverConfig && serverConfig.password ? serverConfig.password : '');
+
+	for (var id in streamServersById) {
+		if (!Object.prototype.hasOwnProperty.call(streamServersById, id)) {
+			continue;
+		}
+		var existing = streamServersById[id] || {};
+		if (String(existing.target || '').trim() !== target) {
+			continue;
+		}
+		if (String(existing.username || '') === username && String(existing.password || '') === password) {
+			return String(id);
+		}
+	}
+
+	for (var fallbackId in streamServersById) {
+		if (!Object.prototype.hasOwnProperty.call(streamServersById, fallbackId)) {
+			continue;
+		}
+		var fallback = streamServersById[fallbackId] || {};
+		if (String(fallback.target || '').trim() === target) {
+			return String(fallbackId);
+		}
+	}
+
+	return '';
+}
+
+function findMatchingRecordingServerId(serverConfig)
+{
+	var url = String(serverConfig && serverConfig.url ? serverConfig.url : '').trim();
+	if (url === '') {
+		return '';
+	}
+	var username = String(serverConfig && serverConfig.username ? serverConfig.username : '');
+	var password = String(serverConfig && serverConfig.password ? serverConfig.password : '');
+
+	for (var id in recordingServersById) {
+		if (!Object.prototype.hasOwnProperty.call(recordingServersById, id)) {
+			continue;
+		}
+		var existing = recordingServersById[id] || {};
+		if (String(existing.url || '').trim() !== url) {
+			continue;
+		}
+		if (String(existing.username || '') === username && String(existing.password || '') === password) {
+			return String(id);
+		}
+	}
+
+	for (var fallbackId in recordingServersById) {
+		if (!Object.prototype.hasOwnProperty.call(recordingServersById, fallbackId)) {
+			continue;
+		}
+		var fallback = recordingServersById[fallbackId] || {};
+		if (String(fallback.url || '').trim() === url) {
+			return String(fallbackId);
+		}
+	}
+
+	return '';
+}
+
+function mergeImportedServersIntoLocalStore(serverBundles)
+{
+	var streamIdMap = {};
+	var recordingIdMap = {};
+	var addedStreamServers = 0;
+	var addedRecordingServers = 0;
+
+	var importedStreamServers = serverBundles && serverBundles.streamingServers ? serverBundles.streamingServers : {};
+	for (var importStreamId in importedStreamServers) {
+		if (!Object.prototype.hasOwnProperty.call(importedStreamServers, importStreamId)) {
+			continue;
+		}
+		var importStreamServer = importedStreamServers[importStreamId];
+		var existingStreamId = findMatchingStreamServerId(importStreamServer);
+		if (existingStreamId !== '') {
+			streamIdMap[String(importStreamId)] = existingStreamId;
+			continue;
+		}
+
+		var nextStreamId = getNextServerId();
+		streamServersById[nextStreamId] = {
+			name: String(importStreamServer.name || ''),
+			target: String(importStreamServer.target || ''),
+			username: String(importStreamServer.username || ''),
+			password: String(importStreamServer.password || '')
+		};
+		streamIdMap[String(importStreamId)] = nextStreamId;
+		addedStreamServers++;
+	}
+
+	var importedRecordingServers = serverBundles && serverBundles.recordingServers ? serverBundles.recordingServers : {};
+	for (var importRecordingId in importedRecordingServers) {
+		if (!Object.prototype.hasOwnProperty.call(importedRecordingServers, importRecordingId)) {
+			continue;
+		}
+		var importRecordingServer = importedRecordingServers[importRecordingId];
+		var existingRecordingId = findMatchingRecordingServerId(importRecordingServer);
+		if (existingRecordingId !== '') {
+			recordingIdMap[String(importRecordingId)] = existingRecordingId;
+			continue;
+		}
+
+		var nextRecordingId = getNextRecordingServerId();
+		recordingServersById[nextRecordingId] = {
+			name: String(importRecordingServer.name || ''),
+			url: String(importRecordingServer.url || ''),
+			username: String(importRecordingServer.username || ''),
+			password: String(importRecordingServer.password || '')
+		};
+		recordingIdMap[String(importRecordingId)] = nextRecordingId;
+		addedRecordingServers++;
+	}
+
+	return {
+		streamIdMap: streamIdMap,
+		recordingIdMap: recordingIdMap,
+		addedStreamServers: addedStreamServers,
+		addedRecordingServers: addedRecordingServers,
+		hasStreamChanges: addedStreamServers > 0,
+		hasRecordingChanges: addedRecordingServers > 0
+	};
+}
+
+function remapImportedTemplateServerIds(importedTemplates, streamIdMap, recordingIdMap)
+{
+	var remapped = {};
+	var sourceTemplates = importedTemplates && typeof importedTemplates === 'object' && !Array.isArray(importedTemplates)
+		? importedTemplates
+		: {};
+
+	for (var name in sourceTemplates) {
+		if (!Object.prototype.hasOwnProperty.call(sourceTemplates, name)) {
+			continue;
+		}
+
+		var templateConfig = sourceTemplates[name];
+		if (!templateConfig || typeof templateConfig !== 'object' || Array.isArray(templateConfig)) {
+			continue;
+		}
+
+		var nextConfig = Object.assign({}, templateConfig);
+		var sourceStreamId = String(nextConfig.streamServerId || '').trim();
+		if (sourceStreamId !== '' && streamIdMap && Object.prototype.hasOwnProperty.call(streamIdMap, sourceStreamId)) {
+			nextConfig.streamServerId = String(streamIdMap[sourceStreamId]);
+		}
+
+		var sourceRecordingId = String(nextConfig.recordingServerId || '').trim();
+		if (sourceRecordingId !== '' && recordingIdMap && Object.prototype.hasOwnProperty.call(recordingIdMap, sourceRecordingId)) {
+			nextConfig.recordingServerId = String(recordingIdMap[sourceRecordingId]);
+		}
+
+		remapped[name] = nextConfig;
+	}
+
+	return remapped;
+}
+
+function collectServerBundlesForTemplates(templateMap)
+{
+	var bundles = {
+		streamingServers: {},
+		recordingServers: {}
+	};
+	if (!templateMap || typeof templateMap !== 'object' || Array.isArray(templateMap)) {
+		return bundles;
+	}
+
+	for (var templateName in templateMap) {
+		if (!Object.prototype.hasOwnProperty.call(templateMap, templateName)) {
+			continue;
+		}
+		var templateConfig = templateMap[templateName];
+		if (!templateConfig || typeof templateConfig !== 'object' || Array.isArray(templateConfig)) {
+			continue;
+		}
+
+		var streamServerId = String(templateConfig.streamServerId || '').trim();
+		if (streamServerId !== '' && Object.prototype.hasOwnProperty.call(streamServersById, streamServerId)) {
+			bundles.streamingServers[streamServerId] = Object.assign({}, streamServersById[streamServerId]);
+		}
+
+		var recordingServerId = String(templateConfig.recordingServerId || '').trim();
+		if (recordingServerId !== '' && Object.prototype.hasOwnProperty.call(recordingServersById, recordingServerId)) {
+			bundles.recordingServers[recordingServerId] = Object.assign({}, recordingServersById[recordingServerId]);
+		}
+	}
+
+	return bundles;
+}
+
 function exportTemplateByName(templateName)
 {
 	var name = String(templateName || '').trim();
@@ -8864,6 +9177,15 @@ function exportTemplateByName(templateName)
 		template: sanitizeTemplateConfig(settingsTemplates[name]),
 	};
 	payload.template.templateName = name;
+	var singleTemplateMap = {};
+	singleTemplateMap[name] = payload.template;
+	var serverBundles = collectServerBundlesForTemplates(singleTemplateMap);
+	if (Object.keys(serverBundles.streamingServers).length > 0) {
+		payload.streamingServers = serverBundles.streamingServers;
+	}
+	if (Object.keys(serverBundles.recordingServers).length > 0) {
+		payload.recordingServers = serverBundles.recordingServers;
+	}
 
 	var jsonContent = '';
 	try {
@@ -8915,7 +9237,15 @@ function exportAllTemplates()
 
 	var jsonContent = '';
 	try {
-		jsonContent = JSON.stringify({ templates: payloadTemplates }, null, 2);
+		var exportPayload = { templates: payloadTemplates };
+		var serverBundles = collectServerBundlesForTemplates(payloadTemplates);
+		if (Object.keys(serverBundles.streamingServers).length > 0) {
+			exportPayload.streamingServers = serverBundles.streamingServers;
+		}
+		if (Object.keys(serverBundles.recordingServers).length > 0) {
+			exportPayload.recordingServers = serverBundles.recordingServers;
+		}
+		jsonContent = JSON.stringify(exportPayload, null, 2);
 	} catch (error) {
 		setStatus('Failed to serialize templates for export.', true);
 		return false;
@@ -9005,6 +9335,9 @@ function importTemplateFromFileForToolbar(file)
 		}
 
 		var importedTemplates = parseImportedTemplatesPayload(parsed);
+		var importedServerBundles = parseImportedServerBundles(parsed);
+		var serverMerge = mergeImportedServersIntoLocalStore(importedServerBundles);
+		importedTemplates = remapImportedTemplateServerIds(importedTemplates, serverMerge.streamIdMap, serverMerge.recordingIdMap);
 		var names = Object.keys(importedTemplates).sort();
 		if (!names.length) {
 			throw new Error('No templates found in JSON.');
@@ -9029,7 +9362,21 @@ function importTemplateFromFileForToolbar(file)
 			settingsTemplates[name] = importedTemplates[name];
 		}
 
-		return saveTemplates().then(function () {
+		var persistPromise = Promise.resolve();
+		if (serverMerge.hasStreamChanges) {
+			persistPromise = persistPromise.then(function () {
+				return saveStreamServers();
+			});
+		}
+		if (serverMerge.hasRecordingChanges) {
+			persistPromise = persistPromise.then(function () {
+				return saveRecordingServers();
+			});
+		}
+
+		return persistPromise.then(function () {
+			return saveTemplates();
+		}).then(function () {
 			refreshGlobalTemplateSelector();
 			var globalTemplateSelect = document.getElementById('globalTemplateSelect');
 			if (globalTemplateSelect) {
@@ -9039,6 +9386,9 @@ function importTemplateFromFileForToolbar(file)
 			var statusMessage = 'Imported ' + names.length + ' template(s).';
 			if (overwriteCount > 0) {
 				statusMessage += ' Overwrote ' + overwriteCount + ' existing template(s).';
+			}
+			if (serverMerge.addedStreamServers > 0 || serverMerge.addedRecordingServers > 0) {
+				statusMessage += ' Added ' + serverMerge.addedStreamServers + ' stream server(s) and ' + serverMerge.addedRecordingServers + ' recording server(s).';
 			}
 			setStatus(statusMessage, false);
 			return null;
@@ -9069,6 +9419,16 @@ function importTemplateFromFileForCard(card, file)
 		}
 
 		var imported = parseImportedTemplatePayload(parsed);
+		var importedServerBundles = parseImportedServerBundles(parsed);
+		var serverMerge = mergeImportedServersIntoLocalStore(importedServerBundles);
+		var remappedTemplates = remapImportedTemplateServerIds(
+			((function () { var tmp = {}; tmp[imported.name] = imported.config; return tmp; })()),
+			serverMerge.streamIdMap,
+			serverMerge.recordingIdMap
+		);
+		if (remappedTemplates[imported.name]) {
+			imported.config = remappedTemplates[imported.name];
+		}
 		var existingTemplate = settingsTemplates[imported.name] || null;
 		if (existingTemplate) {
 			if (!window.confirm('Template "' + imported.name + '" already exists. Overwrite it?')) {
@@ -9076,16 +9436,34 @@ function importTemplateFromFileForCard(card, file)
 			}
 		}
 
-		settingsTemplates[imported.name] = imported.template;
+		settingsTemplates[imported.name] = imported.config;
 		var currentDeviceConfig = Object.assign({}, getConfigForDevice(deviceId));
 		currentDeviceConfig.templateName = imported.name;
 		deviceConfigsById[deviceId] = currentDeviceConfig;
 		saveDeviceConfigs(deviceId);
 
-		return saveTemplates().then(function () {
+		var persistPromise = Promise.resolve();
+		if (serverMerge.hasStreamChanges) {
+			persistPromise = persistPromise.then(function () {
+				return saveStreamServers();
+			});
+		}
+		if (serverMerge.hasRecordingChanges) {
+			persistPromise = persistPromise.then(function () {
+				return saveRecordingServers();
+			});
+		}
+
+		return persistPromise.then(function () {
+			return saveTemplates();
+		}).then(function () {
 			refreshGlobalTemplateSelector();
 			renderDeviceList();
-			setStatus('Imported template "' + imported.name + '".', false);
+			var statusMessage = 'Imported template "' + imported.name + '".';
+			if (serverMerge.addedStreamServers > 0 || serverMerge.addedRecordingServers > 0) {
+				statusMessage += ' Added ' + serverMerge.addedStreamServers + ' stream server(s) and ' + serverMerge.addedRecordingServers + ' recording server(s).';
+			}
+			setStatus(statusMessage, false);
 			return null;
 		});
 	}).catch(function (error) {
@@ -10791,7 +11169,9 @@ function startOrRetuneCard(card)
 	var normalizedDeviceId = normalizeClientDeviceId(String(config.device || '').trim());
 	var requestedAction = knownInstancesByDevice[normalizedDeviceId] ? 'retune' : 'start';
 	setStatus((requestedAction === 'retune' ? 'Queueing retune for device ' : 'Applying config for device ') + (config.device || '?') + '...', false);
-	postUserAction(requestedAction, config).then(function (result) {
+
+	var postActionWithConfig = function (actionConfig) {
+		return postUserAction(requestedAction, actionConfig).then(function (result) {
 		if (result && result.queued) {
 			updateQueueStatusFromServer({
 				pending: Number(result.queuePosition || 0),
@@ -10800,7 +11180,7 @@ function startOrRetuneCard(card)
 				lastProcessedAt: queueStatusState && queueStatusState.lastProcessedAt ? queueStatusState.lastProcessedAt : 0,
 				lastResult: queueStatusState && queueStatusState.lastResult ? queueStatusState.lastResult : null
 			});
-			setStatus(result.message || ('RETUNE queued for device ' + (config.device || '?') + '.'), false);
+			setStatus(result.message || ('RETUNE queued for device ' + (actionConfig.device || '?') + '.'), false);
 			refreshInstances();
 			return;
 		}
@@ -10811,11 +11191,25 @@ function startOrRetuneCard(card)
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
 		syncRadioPipeSockets();
-		fetchDeviceLogs(String(config.device), true).then(function () {
+		fetchDeviceLogs(String(actionConfig.device), true).then(function () {
 			renderDeviceList();
 		});
 	}).catch(function (error) {
 		setStatus(error.message, true);
+	});
+	};
+
+	if (requestedAction !== 'retune') {
+		postActionWithConfig(config);
+		return;
+	}
+
+	saveUiSettingsNow().catch(function () {
+		return null;
+	}).finally(function () {
+		var latestConfig = Object.assign({}, getConfigForDevice(normalizedDeviceId), readCardConfig(card));
+		latestConfig.device = String(config.device || latestConfig.device || normalizedDeviceId);
+		postActionWithConfig(latestConfig);
 	});
 }
 

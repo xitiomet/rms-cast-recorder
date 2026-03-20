@@ -20,7 +20,7 @@ Usage:
 Options:
 	--endpoint URL         Endpoint to tick (default: http://127.0.0.1/rtl_sdr.php)
 	--action NAME          Action value sent to endpoint (default: list)
-	--source NAME          Source value sent to endpoint (default: --service-name)
+	--source NAME          Source value sent to endpoint (default: watchdog)
 	--interval-sec N       Timer interval in seconds (default: 10)
 	--user NAME            Run service as this user (default: auto-detect web user, fallback root)
 	--group NAME           Run service as this group (default: same as --user)
@@ -138,7 +138,7 @@ validate_inputs() {
 		GROUP_NAME="${USER_NAME}"
 	fi
 	if [[ -z "${SOURCE}" ]]; then
-		SOURCE="${SERVICE_NAME}"
+		SOURCE="watchdog"
 	fi
 
 	id -u "${USER_NAME}" >/dev/null 2>&1 || die "User not found: ${USER_NAME}"
