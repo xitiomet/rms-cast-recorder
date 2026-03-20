@@ -111,7 +111,9 @@ Retune actions are queued and applied by watchdog ticks. For unattended operatio
 $ sudo ./scripts/install_rtl_sdr_watchdog.sh --endpoint http://127.0.0.1/rtl_sdr.php
 ```
 
-The watchdog posts `action=list&source=watchdog` on an interval to process queued retunes and periodic state cleanup.
+The installer now embeds the tick script into the installed target path (`--tick-dest`) and runs a preflight endpoint check before creating systemd units.
+
+By default, the watchdog posts `action=list` with `source=<service-name>` on each interval (override with `--action` and `--source`) to process queued retunes and periodic state cleanup.
 
 
 ## Usages
