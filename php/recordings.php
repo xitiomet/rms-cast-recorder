@@ -19,6 +19,10 @@ if (file_exists(__DIR__ . '/config.php')) {
 	include __DIR__ . '/config.php';
 }
 
+$recordingsRequestAuthUsername = '';
+$recordingsRequestAuthVia = '';
+$recordingsRequestAuthHash = '';
+
 // End Settings
 
 
@@ -190,39 +194,106 @@ function getConfiguredRecordingsAccounts(): array
 
 function verifyRecordingsLogin(string $username, string $password): bool
 {
+	return count(findMatchingConfiguredRecordingsAccount($username, $password)) > 0;
+}
+
+function findMatchingConfiguredRecordingsAccount(string $username, string $password): array
+{
 	$configuredAccounts = getConfiguredRecordingsAccounts();
 	if (count($configuredAccounts) === 0) {
 		recordingsAuthDebugLog('Configured credentials are missing; login attempt denied.', array('username' => $username));
-		return false;
+		return array();
 	}
 
-	$matchFound = false;
 	foreach ($configuredAccounts as $configuredAccount) {
 		if (!hash_equals((string)$configuredAccount['username'], $username)) {
 			continue;
 		}
 
 		if (isset($configuredAccount['password']) && hash_equals((string)$configuredAccount['password'], $password)) {
-			$matchFound = true;
-			break;
+			recordingsAuthDebugLog('Configured credential verification completed.', array(
+				'username' => $username,
+				'success' => true,
+				'configured_count' => count($configuredAccounts),
+			));
+			return $configuredAccount;
 		}
 
 		if (isset($configuredAccount['hashedPassword']) && verifyPasswordAgainstConfiguredHash($password, (string)$configuredAccount['hashedPassword'])) {
-			$matchFound = true;
-			break;
+			recordingsAuthDebugLog('Configured credential verification completed.', array(
+				'username' => $username,
+				'success' => true,
+				'configured_count' => count($configuredAccounts),
+			));
+			return $configuredAccount;
 		}
 	}
 
 	recordingsAuthDebugLog('Configured credential verification completed.', array(
 		'username' => $username,
-		'success' => $matchFound,
+		'success' => false,
 		'configured_count' => count($configuredAccounts),
 	));
-	return $matchFound;
+	return array();
+}
+
+function getRecordingsAccountSecretMaterial(array $configuredAccount): string
+{
+	if (isset($configuredAccount['hashedPassword']) && is_string($configuredAccount['hashedPassword'])) {
+		$normalizedHash = normalizeConfiguredPasswordHash((string)$configuredAccount['hashedPassword']);
+		if ($normalizedHash !== '') {
+			return 'hashed:' . $normalizedHash;
+		}
+	}
+
+	if (isset($configuredAccount['password']) && is_string($configuredAccount['password']) && $configuredAccount['password'] !== '') {
+		return 'plain:' . (string)$configuredAccount['password'];
+	}
+
+	return '';
+}
+
+function buildRecordingsAuthHashForAccount(array $configuredAccount): string
+{
+	$username = isset($configuredAccount['username']) && is_string($configuredAccount['username'])
+		? trim((string)$configuredAccount['username'])
+		: '';
+	$secretMaterial = getRecordingsAccountSecretMaterial($configuredAccount);
+	if ($username === '' || $secretMaterial === '') {
+		return '';
+	}
+
+	return hash_hmac('sha256', 'recordings-auth|' . $username, $secretMaterial);
+}
+
+function findConfiguredRecordingsAccountByAuthHash(string $hash): array
+{
+	$normalizedHash = strtolower(trim($hash));
+	if ($normalizedHash === '') {
+		return array();
+	}
+
+	foreach (getConfiguredRecordingsAccounts() as $configuredAccount) {
+		$candidateHash = buildRecordingsAuthHashForAccount($configuredAccount);
+		if ($candidateHash === '') {
+			continue;
+		}
+
+		if (hash_equals($candidateHash, $normalizedHash)) {
+			return $configuredAccount;
+		}
+	}
+
+	return array();
 }
 
 function recordingsAuthIsLoggedIn(): bool
 {
+	global $recordingsRequestAuthUsername;
+	if (is_string($recordingsRequestAuthUsername) && $recordingsRequestAuthUsername !== '') {
+		return true;
+	}
+
 	return isset($_SESSION['recordings_auth_logged_in'], $_SESSION['recordings_auth_username'])
 		&& $_SESSION['recordings_auth_logged_in'] === true
 		&& is_string($_SESSION['recordings_auth_username'])
@@ -231,11 +302,38 @@ function recordingsAuthIsLoggedIn(): bool
 
 function getRecordingsAuthenticatedUsername(): string
 {
+	global $recordingsRequestAuthUsername;
+	if (is_string($recordingsRequestAuthUsername) && $recordingsRequestAuthUsername !== '') {
+		return $recordingsRequestAuthUsername;
+	}
+
 	if (!recordingsAuthIsLoggedIn()) {
 		return '';
 	}
 
 	return (string)$_SESSION['recordings_auth_username'];
+}
+
+function getRecordingsAuthenticatedHash(): string
+{
+	global $recordingsRequestAuthHash;
+	return is_string($recordingsRequestAuthHash) ? $recordingsRequestAuthHash : '';
+}
+
+function setRecordingsRequestAuthenticatedUser(string $username, string $via, string $hash = ''): void
+{
+	global $recordingsRequestAuthUsername, $recordingsRequestAuthVia, $recordingsRequestAuthHash;
+	$recordingsRequestAuthUsername = $username;
+	$recordingsRequestAuthVia = $via;
+	$recordingsRequestAuthHash = $hash;
+}
+
+function clearRecordingsRequestAuthenticatedUser(): void
+{
+	global $recordingsRequestAuthUsername, $recordingsRequestAuthVia, $recordingsRequestAuthHash;
+	$recordingsRequestAuthUsername = '';
+	$recordingsRequestAuthVia = '';
+	$recordingsRequestAuthHash = '';
 }
 
 function setRecordingsAuthenticatedUser(string $username): void
@@ -244,10 +342,12 @@ function setRecordingsAuthenticatedUser(string $username): void
 	$_SESSION['recordings_auth_logged_in'] = true;
 	$_SESSION['recordings_auth_username'] = $username;
 	$_SESSION['recordings_auth_logged_in_at'] = time();
+	setRecordingsRequestAuthenticatedUser($username, 'session');
 }
 
 function clearRecordingsAuthenticatedUser(): void
 {
+	clearRecordingsRequestAuthenticatedUser();
 	unset($_SESSION['recordings_auth_logged_in']);
 	unset($_SESSION['recordings_auth_username']);
 	unset($_SESSION['recordings_auth_logged_in_at']);
@@ -266,6 +366,68 @@ function getRecordingsRequestPath(): string
 	}
 
 	return $path;
+}
+
+function buildRecordingsRequestUrl(array $overrides = array(), array $removeKeys = array()): string
+{
+	$requestUri = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';
+	$queryString = parse_url($requestUri, PHP_URL_QUERY);
+	$params = array();
+	if (is_string($queryString) && $queryString !== '') {
+		parse_str($queryString, $params);
+		if (!is_array($params)) {
+			$params = array();
+		}
+	}
+
+	foreach ($removeKeys as $removeKey) {
+		unset($params[(string)$removeKey]);
+	}
+
+	foreach ($overrides as $key => $value) {
+		$key = (string)$key;
+		if ($value === null || $value === '') {
+			unset($params[$key]);
+			continue;
+		}
+
+		$params[$key] = (string)$value;
+	}
+
+	$query = http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+	return getRecordingsRequestPath() . ($query !== '' ? '?' . $query : '');
+}
+
+function getRecordingsRequestHashFromRequest(): string
+{
+	if (isset($_GET['hash']) && is_string($_GET['hash'])) {
+		return trim((string)$_GET['hash']);
+	}
+
+	if (isset($_POST['hash']) && is_string($_POST['hash'])) {
+		return trim((string)$_POST['hash']);
+	}
+
+	return '';
+}
+
+function authenticateRecordingsRequestByHash(): bool
+{
+	$providedHash = getRecordingsRequestHashFromRequest();
+	if ($providedHash === '') {
+		return false;
+	}
+
+	$matchedAccount = findConfiguredRecordingsAccountByAuthHash($providedHash);
+	if (count($matchedAccount) === 0) {
+		recordingsAuthDebugLog('Hash authentication failed.', array('hash_present' => true));
+		return false;
+	}
+
+	$username = isset($matchedAccount['username']) ? (string)$matchedAccount['username'] : '';
+	setRecordingsRequestAuthenticatedUser($username, 'hash', buildRecordingsAuthHashForAccount($matchedAccount));
+	recordingsAuthDebugLog('Hash authentication successful.', array('username' => $username));
+	return true;
 }
 
 function respondToUnauthenticatedRecordingsRequest(string $ajaxAction): void
@@ -350,6 +512,10 @@ function enforceRecordingsAuthentication(bool $authenticateEnabled, string $page
 		return;
 	}
 
+	if (authenticateRecordingsRequestByHash()) {
+		return;
+	}
+
 	$loginError = '';
 	if (isset($_GET['username']) || isset($_GET['password'])) {
 		$username = isset($_GET['username']) ? trim((string)$_GET['username']) : '';
@@ -359,11 +525,16 @@ function enforceRecordingsAuthentication(bool $authenticateEnabled, string $page
 			'has_password' => ($password !== ''),
 		));
 
-		if (verifyRecordingsLogin($username, $password)) {
+		$matchedAccount = findMatchingConfiguredRecordingsAccount($username, $password);
+		if (count($matchedAccount) > 0) {
+			$authHash = buildRecordingsAuthHashForAccount($matchedAccount);
 			recordingsAuthDebugLog('Query login successful.', array('username' => $username));
 			setRecordingsAuthenticatedUser($username);
+			if ($authHash !== '') {
+				setRecordingsRequestAuthenticatedUser($username, 'hash', $authHash);
+			}
 			if ($ajaxAction === '') {
-				header('Location: ' . getRecordingsRequestPath());
+				header('Location: ' . buildRecordingsRequestUrl(array('hash' => $authHash), array('username', 'password', 'logout')));
 				exit;
 			}
 
@@ -388,7 +559,7 @@ function enforceRecordingsAuthentication(bool $authenticateEnabled, string $page
 		if (verifyRecordingsLogin($username, $password)) {
 			recordingsAuthDebugLog('Login successful.', array('username' => $username));
 			setRecordingsAuthenticatedUser($username);
-			header('Location: ' . getRecordingsRequestPath());
+			header('Location: ' . buildRecordingsRequestUrl(array(), array('hash', 'logout')));
 			exit;
 		}
 
@@ -525,6 +696,10 @@ function recordingsIngestRequestAuthorized(bool $authenticateEnabled): bool
 
 	startRecordingsAuthSession();
 	if (recordingsAuthIsLoggedIn()) {
+		return true;
+	}
+
+	if (authenticateRecordingsRequestByHash()) {
 		return true;
 	}
 
@@ -3514,6 +3689,20 @@ var totalRecordingsSizeBytes = 0;
 var lastStatusMessage = '';
 var lastStatusIsError = false;
 var playerSkipAmountSeconds = 10;
+var recordingsAuthHash = <?=json_encode(getRecordingsAuthenticatedHash(), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)?>;
+
+function appendRecordingsAuthHash(url)
+{
+	if (!recordingsAuthHash) {
+		return url;
+	}
+
+	if (/[?&]hash=/.test(url)) {
+		return url;
+	}
+
+	return url + (url.indexOf('?') === -1 ? '?' : '&') + 'hash=' + encodeURIComponent(recordingsAuthHash);
+}
 
 function applyTheme(themeName)
 {
@@ -3956,7 +4145,7 @@ function buildLiveProxyUrl(recording)
 		proxyUrl += '&v=' + encodeURIComponent(String(recording.mtime));
 	}
 
-	return proxyUrl;
+	return appendRecordingsAuthHash(proxyUrl);
 }
 
 function getRecordingFileName(recording)
@@ -4056,7 +4245,7 @@ function onDownloadSelectedButtonClicked()
 
 	var recording = recordingsByPath[selectedPath];
 	var downloadUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime;
-	window.location.href = downloadUrl;
+	window.location.href = appendRecordingsAuthHash(downloadUrl);
 }
 
 function onListenLiveButtonClicked()
@@ -4133,7 +4322,7 @@ function applySelectedToPlayer(autoPlay, forceRecordingSource)
 
 	var recording = recordingsByPath[selectedPath];
 
-	var streamUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&v=' + recording.mtime;
+	var streamUrl = appendRecordingsAuthHash('?ajax=stream&file=' + encodeURIComponent(recording.path) + '&v=' + recording.mtime);
 	var currentMode = audioPlayer.getAttribute('data-mode');
 	var currentPath = audioPlayer.getAttribute('data-path');
 	var isLiveModeForSelectedRecording = (currentMode === 'live' && currentPath === recording.path);
@@ -4977,7 +5166,7 @@ function renderRecordings(groups)
 			downloadCell.className = 'recording-download';
 
 			var rowDownloadLink = document.createElement('a');
-			rowDownloadLink.href = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime;
+			rowDownloadLink.href = appendRecordingsAuthHash('?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime);
 			rowDownloadLink.textContent = 'Download';
 			rowDownloadLink.setAttribute('download', recording.name);
 			rowDownloadLink.onclick = function (event) {
@@ -5042,7 +5231,7 @@ function exportFilteredZip()
 		url += '&end=' + dateRange.endTs;
 	}
 
-	window.location.href = url;
+	window.location.href = appendRecordingsAuthHash(url);
 }
 
 function refreshRecordings(manualRefresh)
@@ -5132,7 +5321,7 @@ function refreshRecordings(manualRefresh)
 		hasLoadedRecordingsOnce = true;
 	};
 
-	xhr.open('GET', '?ajax=list&rnd=' + Math.random(), true);
+	xhr.open('GET', appendRecordingsAuthHash('?ajax=list&rnd=' + Math.random()), true);
 	xhr.send(null);
 }
 
