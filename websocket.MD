@@ -15,10 +15,16 @@ radio-pipe --stdin --api-websocket 0.0.0.0:9000
 
 All messages are JSON objects.
 
+Common fields in every packet:
+- `event`: event type
+- `pid`: process ID of the running `radio-pipe` instance
+- `apiPort`: websocket API port
+- `timestamp`: Unix epoch timestamp in milliseconds when the packet is emitted
+
 ### DCS detected
 
 ```json
-{"event":"dcsDetected","dcs":"073","polarity":"normal"}
+{"event":"dcsDetected","pid":12345,"apiPort":4040,"timestamp":1710938400001,"dcs":"073","polarity":"normal"}
 ```
 
 Sent when a configured DCS gate opens.
@@ -31,7 +37,7 @@ Fields:
 ### DCS gone
 
 ```json
-{"event":"dcsGone","dcs":"073","polarity":"normal"}
+{"event":"dcsGone","pid":12345,"apiPort":4040,"timestamp":1710938401001,"dcs":"073","polarity":"normal"}
 ```
 
 Sent when a configured DCS gate closes.
@@ -39,7 +45,7 @@ Sent when a configured DCS gate closes.
 ### CTCSS detected
 
 ```json
-{"event":"ctcssDetected","ctcss":"100.0"}
+{"event":"ctcssDetected","pid":12345,"apiPort":4040,"timestamp":1710938400002,"ctcss":"100.0"}
 ```
 
 Sent when a configured CTCSS gate opens.
@@ -47,7 +53,7 @@ Sent when a configured CTCSS gate opens.
 ### CTCSS gone
 
 ```json
-{"event":"ctcssGone","ctcss":"100.0"}
+{"event":"ctcssGone","pid":12345,"apiPort":4040,"timestamp":1710938401002,"ctcss":"100.0"}
 ```
 
 Sent when a configured CTCSS gate closes.
@@ -55,7 +61,7 @@ Sent when a configured CTCSS gate closes.
 ### Gate closed
 
 ```json
-{"event":"gateClosed","reason":"dcs"}
+{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401003,"reason":"dcs"}
 ```
 
 Sent when audio flow becomes blocked, or when the blocking reason changes.
@@ -68,7 +74,7 @@ Reason values:
 ### Gate open
 
 ```json
-{"event":"gateOpen","reason":"dcs"}
+{"event":"gateOpen","pid":12345,"apiPort":4040,"timestamp":1710938400003,"reason":"dcs"}
 ```
 
 Sent when audio flow is no longer blocked.
@@ -79,7 +85,7 @@ Field:
 ### Audio detected
 
 ```json
-{"event":"audioDetected"}
+{"event":"audioDetected","pid":12345,"apiPort":4040,"timestamp":1710938400004}
 ```
 
 Sent when a new gated audio clip starts.
@@ -87,7 +93,7 @@ Sent when a new gated audio clip starts.
 ### Silence detected
 
 ```json
-{"event":"silenceDetected"}
+{"event":"silenceDetected","pid":12345,"apiPort":4040,"timestamp":1710938401004}
 ```
 
 Sent when silence duration threshold is reached and the active clip is closed.
@@ -95,7 +101,7 @@ Sent when silence duration threshold is reached and the active clip is closed.
 ### Hook executed
 
 ```json
-{"event":"hookExecuted","command":"/path/to/hook /path/to/file.wav"}
+{"event":"hookExecuted","pid":12345,"apiPort":4040,"timestamp":1710938401005,"command":"/path/to/hook /path/to/file.wav"}
 ```
 
 Sent when an `--on-write` hook command is launched.
@@ -104,23 +110,35 @@ Fields:
 - `event`: always `hookExecuted`
 - `command`: full command line that is executed
 
+### Saved recording
+
+```json
+{"event":"savedRecording","pid":12345,"apiPort":4040,"timestamp":1710938400123,"filename":"/home/user/recordings/2026-03-20/2026-03-20_120000_dev0.wav"}
+```
+
+Sent when a clip is successfully written to disk.
+
+Fields:
+- `event`: always `savedRecording`
+- `filename`: full absolute path to the saved recording file
+
 ### Hook result
 
 ```json
-{"event":"hookResult","result":"exitCode=0"}
+{"event":"hookResult","pid":12345,"apiPort":4040,"timestamp":1710938401006,"result":"exitCode=0"}
 ```
 
 Sent for hook output lines and final status.
 
 Examples:
-- `{"event":"hookResult","result":"processing file..."}`
-- `{"event":"hookResult","result":"exitCode=0"}`
-- `{"event":"hookResult","result":"error: ..."}`
+- `{"event":"hookResult","pid":12345,"apiPort":4040,"timestamp":1710938401006,"result":"processing file..."}`
+- `{"event":"hookResult","pid":12345,"apiPort":4040,"timestamp":1710938401007,"result":"exitCode=0"}`
+- `{"event":"hookResult","pid":12345,"apiPort":4040,"timestamp":1710938401008,"result":"error: ..."}`
 
 ### Status (every 250ms)
 
 ```json
-{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"normal","dcsGate":"open","ctcssGateEnabled":true,"ctcss":"100.0","ctcssGate":"open","rmsGate":"closed","rmsDb":-15.3,"gate":"closed","gateReason":"silence","gateSeconds":1.002,"audioDetected":false,"audioDetectedSeconds":1.002}
+{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400123,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"normal","dcsGate":"open","ctcssGateEnabled":true,"ctcss":"100.0","ctcssGate":"open","rmsGate":"closed","rmsDb":-15.3,"gate":"closed","gateReason":"silence","gateSeconds":1.002,"audioDetected":false,"audioDetectedSeconds":1.002,"audioReason":[]}
 ```
 
 Sent every 250 milliseconds while the recorder is running.
@@ -147,19 +165,21 @@ Fields:
 - `gateSeconds`: seconds since the overall gate entered its current state
 - `audioDetected`: `true` when current audio frames pass all gate conditions
 - `audioDetectedSeconds`: seconds since `audioDetected` last changed
+- `audioReason`: array of open-audio reasons. When the overall gate is open this contains `"dcs"`, `"ctcss"`, and `"rms"`; when the overall gate is closed this is an empty array
 
 ## Example sequence
 
 Typical gated receive cycle (DCS gate configured):
 
 ```json
-{"event":"dcsDetected","dcs":"073","polarity":"normal"}
-{"event":"gateOpen","reason":"dcs"}
-{"event":"audioDetected"}
-{"event":"silenceDetected"}
-{"event":"gateClosed","reason":"silence"}
-{"event":"dcsGone","dcs":"073","polarity":"normal"}
-{"event":"gateClosed","reason":"dcs"}
+{"event":"dcsDetected","pid":12345,"apiPort":4040,"timestamp":1710938400001,"dcs":"073","polarity":"normal"}
+{"event":"gateOpen","pid":12345,"apiPort":4040,"timestamp":1710938400003,"reason":"dcs"}
+{"event":"audioDetected","pid":12345,"apiPort":4040,"timestamp":1710938400004}
+{"event":"silenceDetected","pid":12345,"apiPort":4040,"timestamp":1710938401004}
+{"event":"savedRecording","pid":12345,"apiPort":4040,"timestamp":1710938401005,"filename":"/home/user/recordings/2026-03-20/2026-03-20_120000_dev0.wav"}
+{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401006,"reason":"silence"}
+{"event":"dcsGone","pid":12345,"apiPort":4040,"timestamp":1710938401007,"dcs":"073","polarity":"normal"}
+{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401008,"reason":"dcs"}
 ```
 
 Notes:
@@ -173,13 +193,13 @@ Live detection continues to populate status packets even when DCS or CTCSS gatin
 Ungated DCS decode:
 
 ```json
-{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"inverted","dcsGate":"open","ctcssGateEnabled":false,"ctcss":null,"ctcssGate":"open","rmsGate":"open","rmsDb":-14.8,"gate":"open","gateReason":"none","gateSeconds":0.250,"audioDetected":true,"audioDetectedSeconds":0.250}
+{"event":"status","streamName":"dev0","source":"stdin:44100,s16le,2","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400456,"dcsGateEnabled":false,"dcs":"073","dcsPolarity":"inverted","dcsGate":"open","ctcssGateEnabled":false,"ctcss":null,"ctcssGate":"open","rmsGate":"open","rmsDb":-14.8,"gate":"open","gateReason":"none","gateSeconds":0.250,"audioDetected":true,"audioDetectedSeconds":0.250,"audioReason":["dcs","ctcss","rms"]}
 ```
 
 Ungated CTCSS decode:
 
 ```json
-{"event":"status","streamName":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"dcsGateEnabled":false,"dcs":null,"dcsPolarity":null,"dcsGate":"open","ctcssGateEnabled":false,"ctcss":"100.0","ctcssGate":"open","rmsGate":"open","rmsDb":-17.1,"gate":"open","gateReason":"none","gateSeconds":0.500,"audioDetected":true,"audioDetectedSeconds":0.500}
+{"event":"status","streamName":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400789,"dcsGateEnabled":false,"dcs":null,"dcsPolarity":null,"dcsGate":"open","ctcssGateEnabled":false,"ctcss":"100.0","ctcssGate":"open","rmsGate":"open","rmsDb":-17.1,"gate":"open","gateReason":"none","gateSeconds":0.500,"audioDetected":true,"audioDetectedSeconds":0.500,"audioReason":["dcs","ctcss","rms"]}
 ```
 
 ## Notes

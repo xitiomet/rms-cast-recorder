@@ -1057,6 +1057,8 @@ public class StreamRecorder {
                 log("WRITE", ANSI_YELLOW,
                         "Saved clip but could not append WAV metadata: " + metadataException.getMessage());
             }
+            publishEvent("savedRecording",
+                    "filename", out.toAbsolutePath().normalize().toString());
             log("WRITE", ANSI_GREEN, "Saved clip: " + out);
             runOnWriteProgram(out.toAbsolutePath());
         } catch (IOException ioe) {
@@ -1383,27 +1385,40 @@ public class StreamRecorder {
         String recordingsPathValue = (baseDir != null) ? baseDir.toAbsolutePath().toString() : null;
         double gateSecondsValue = Double.parseDouble(formatDurationSeconds(gateSinceNanos, nowNanos));
         double audioDetectedSecondsValue = Double.parseDouble(formatDurationSeconds(audioDetectedSinceNanos, nowNanos));
+        List<String> audioReasonValue = new ArrayList<>(3);
+        if (gateOpen) {
+            if (dcsGateOpen) {
+                audioReasonValue.add("dcs");
+            }
+            if (ctcssGateOpen) {
+                audioReasonValue.add("ctcss");
+            }
+            if (rmsGateOpen) {
+                audioReasonValue.add("rms");
+            }
+        }
         publishEvent("status",
-            "streamName", streamName,
+                "streamName", streamName,
                 "source", sourceValue,
                 "recordingEnabled", recordingEnabledValue,
                 "recordingsPath", recordingsPathValue,
                 "pid", pidValue,
-            "apiPort", apiPortValue,
-            "dcsGateEnabled", dcsGateEnabled,
+                "apiPort", apiPortValue,
+                "dcsGateEnabled", dcsGateEnabled,
                 "dcs", currentDcsLabel,
-            "dcsPolarity", currentDcsPolarity,
-            "dcsGate", dcsGateOpen ? "open" : "closed",
-            "ctcssGateEnabled", ctcssGateEnabled,
+                "dcsPolarity", currentDcsPolarity,
+                "dcsGate", dcsGateOpen ? "open" : "closed",
+                "ctcssGateEnabled", ctcssGateEnabled,
                 "ctcss", currentCtcssLabel,
-            "ctcssGate", ctcssGateOpen ? "open" : "closed",
-            "rmsGate", rmsGateOpen ? "open" : "closed",
-            "rmsDb", Math.round(rmsDb * 10.0) / 10.0,
+                "ctcssGate", ctcssGateOpen ? "open" : "closed",
+                "rmsGate", rmsGateOpen ? "open" : "closed",
+                "rmsDb", Math.round(rmsDb * 10.0) / 10.0,
                 "gate", gateOpen ? "open" : "closed",
-            "gateReason", gateReasonValue,
-            "gateSeconds", gateSecondsValue,
-            "audioDetected", audioDetected,
-            "audioDetectedSeconds", audioDetectedSecondsValue);
+                "gateReason", gateReasonValue,
+                "gateSeconds", gateSecondsValue,
+                "audioDetected", audioDetected,
+                "audioDetectedSeconds", audioDetectedSecondsValue,
+                "audioReason", audioReasonValue);
         return nowNanos + TimeUnit.MILLISECONDS.toNanos(250L);
     }
 
@@ -1417,7 +1432,8 @@ public class StreamRecorder {
         if (currentApiWebSocketServer == null) {
             return;
         }
-        currentApiWebSocketServer.publishEvent(event);
+        currentApiWebSocketServer.publishEvent(event,
+                withEventMetadata(currentApiWebSocketServer, new Object[0]));
     }
 
     private void publishEvent(String event, String... keyValuePairs) {
@@ -1425,7 +1441,14 @@ public class StreamRecorder {
         if (currentApiWebSocketServer == null) {
             return;
         }
-        currentApiWebSocketServer.publishEvent(event, keyValuePairs);
+        Object[] objectPairs = new Object[(keyValuePairs == null) ? 0 : keyValuePairs.length];
+        if (keyValuePairs != null) {
+            for (int i = 0; i < keyValuePairs.length; i++) {
+                objectPairs[i] = keyValuePairs[i];
+            }
+        }
+        currentApiWebSocketServer.publishEvent(event,
+                withEventMetadata(currentApiWebSocketServer, objectPairs));
     }
 
     private void publishEvent(String event, Object... keyValuePairs) {
@@ -1433,7 +1456,50 @@ public class StreamRecorder {
         if (currentApiWebSocketServer == null) {
             return;
         }
-        currentApiWebSocketServer.publishEvent(event, keyValuePairs);
+        currentApiWebSocketServer.publishEvent(event,
+                withEventMetadata(currentApiWebSocketServer, keyValuePairs));
+    }
+
+    private static Object[] withEventMetadata(ApiWebSocketServer apiServer, Object[] keyValuePairs) {
+        Object[] basePairs = (keyValuePairs == null) ? new Object[0] : keyValuePairs;
+        boolean hasPid = false;
+        boolean hasApiPort = false;
+        boolean hasTimestamp = false;
+        for (int i = 0; i + 1 < basePairs.length; i += 2) {
+            Object keyObject = basePairs[i];
+            if (keyObject == null) {
+                continue;
+            }
+            String key = keyObject.toString();
+            if ("pid".equals(key)) {
+                hasPid = true;
+            } else if ("apiPort".equals(key)) {
+                hasApiPort = true;
+            } else if ("timestamp".equals(key)) {
+                hasTimestamp = true;
+            }
+        }
+
+        int extraFields = (hasPid ? 0 : 2) + (hasApiPort ? 0 : 2) + (hasTimestamp ? 0 : 2);
+        if (extraFields == 0) {
+            return basePairs;
+        }
+
+        Object[] mergedPairs = Arrays.copyOf(basePairs, basePairs.length + extraFields);
+        int writeIndex = basePairs.length;
+        if (!hasPid) {
+            mergedPairs[writeIndex++] = "pid";
+            mergedPairs[writeIndex++] = ProcessHandle.current().pid();
+        }
+        if (!hasApiPort) {
+            mergedPairs[writeIndex++] = "apiPort";
+            mergedPairs[writeIndex++] = apiServer.getAddress().getPort();
+        }
+        if (!hasTimestamp) {
+            mergedPairs[writeIndex++] = "timestamp";
+            mergedPairs[writeIndex++] = System.currentTimeMillis();
+        }
+        return mergedPairs;
     }
 
     private void updateStreamLabel(HttpURLConnection conn) {

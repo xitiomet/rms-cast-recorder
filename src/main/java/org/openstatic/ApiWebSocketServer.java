@@ -4,6 +4,7 @@ import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
+import java.lang.reflect.Array;
 import java.net.InetSocketAddress;
 
 public final class ApiWebSocketServer extends WebSocketServer {
@@ -100,18 +101,53 @@ public final class ApiWebSocketServer extends WebSocketServer {
                 continue;
             }
             json.append(",\"").append(escapeJson(key)).append("\":");
-            if (valueObj == null) {
-                json.append("null");
-            } else if (valueObj instanceof Number || valueObj instanceof Boolean) {
-                json.append(valueObj);
-            } else {
-                String value = valueObj.toString();
-                json.append("\"").append(escapeJson(value)).append("\"");
-            }
+            appendJsonValue(json, valueObj);
         }
         json.append("}");
 
         broadcast(json.toString());
+    }
+
+    private static void appendJsonValue(StringBuilder json, Object valueObj) {
+        if (valueObj == null) {
+            json.append("null");
+            return;
+        }
+
+        if (valueObj instanceof Number || valueObj instanceof Boolean) {
+            json.append(valueObj);
+            return;
+        }
+
+        if (valueObj instanceof Iterable<?>) {
+            json.append("[");
+            boolean first = true;
+            for (Object item : (Iterable<?>) valueObj) {
+                if (!first) {
+                    json.append(",");
+                }
+                appendJsonValue(json, item);
+                first = false;
+            }
+            json.append("]");
+            return;
+        }
+
+        if (valueObj.getClass().isArray()) {
+            json.append("[");
+            int length = Array.getLength(valueObj);
+            for (int i = 0; i < length; i++) {
+                if (i > 0) {
+                    json.append(",");
+                }
+                appendJsonValue(json, Array.get(valueObj, i));
+            }
+            json.append("]");
+            return;
+        }
+
+        String value = valueObj.toString();
+        json.append("\"").append(escapeJson(value)).append("\"");
     }
 
     public void shutdownQuietly() {
