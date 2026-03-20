@@ -171,6 +171,68 @@ $ ./radio-pipe \
 ```
 
 See `websocket.MD` for event details and examples.
+
+## Audio Pipeline And Gate Order
+
+RadioPipe uses one internal processing path regardless of whether audio comes from a network stream or stdin.
+
+### End-to-end audio path
+
+1. Input arrives from one of these sources:
+  * `--url`: Shoutcast/Icecast stream
+  * `--stdin`: containerized audio from stdin
+  * `--stdin --stdin-raw`: raw PCM from stdin using the `--stdin-rate`, `--stdin-channels`, and `--stdin-bits` settings
+2. The input is decoded into signed 16-bit PCM for analysis.
+3. An input de-jitter buffer smooths short read stalls before the gate logic runs.
+4. Audio is processed in small chunks and evaluated by the gate stages described below.
+5. If the gate is open, audio is counted as active sound and starts or continues a clip.
+6. If a clip is already open and the gate closes, RadioPipe keeps appending the non-passing tail until the configured silence timeout expires, then closes the clip.
+7. When a clip closes:
+  * file output writes a WAV file under the recordings directory if `-o` is enabled
+  * `--stdout` writes the finished clip to stdout as WAV
+  * `--on-write` runs after a file clip is written
+8. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
+
+### Gate stages in evaluation order
+
+Each chunk is checked in this order:
+
+1. RMS silence gate
+  * The chunk RMS level is measured in dB.
+  * If it is below the configured silence threshold, the chunk is blocked immediately.
+  * This is the first blocking condition and its status reason is `silence`.
+2. DCS gate, if `--dcs` is configured
+  * The chunk is checked for the required DCS code.
+  * If the code was recently present and `--gate-hold` is greater than `0`, the DCS gate can stay open for the grace period.
+  * If this stage fails, the blocking reason becomes `dcs`.
+3. CTCSS gate, if `--ctcss` is configured
+  * The chunk is checked for the required CTCSS tone.
+  * Like DCS, it can remain open briefly using the same `--gate-hold` grace period.
+  * If this stage fails, the blocking reason becomes `ctcss`.
+
+The gate only passes audio when all active checks are true:
+
+```text
+not silent AND dcs match AND ctcss match
+```
+
+If a gate is not configured, that stage is treated as already open.
+
+### Gate reason precedence
+
+When more than one condition could block audio, RadioPipe reports the first failing stage in this fixed order:
+
+```text
+silence -> dcs -> ctcss
+```
+
+That means a silent chunk is reported as `silence` even if DCS or CTCSS would also fail.
+
+### Clip close behavior
+
+A clip does not close the instant the gate fails. After a clip has started, RadioPipe keeps buffering trailing audio until the accumulated blocked period reaches the configured silence duration. At that point it closes the clip.
+
+Only clips with more than 1 second of gated sound are kept. Short bursts below that threshold are discarded.
 ## Sample Scripts
 
 The `scripts/` directory contains helper scripts for converting recorded WAV files to compressed formats. All scripts require `exiftool` (`sudo apt install -y libimage-exiftool-perl`) to preserve the stream title and comment metadata during conversion.
