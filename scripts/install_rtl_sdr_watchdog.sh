@@ -145,6 +145,41 @@ validate_inputs() {
 	getent group "${GROUP_NAME}" >/dev/null 2>&1 || die "Group not found: ${GROUP_NAME}"
 }
 
+check_plugdev_membership() {
+	# Skip if plugdev group does not exist on this system.
+	if ! getent group plugdev >/dev/null 2>&1; then
+		echo "Note: plugdev group not found on this system — skipping RTL-SDR group check."
+		return 0
+	fi
+
+	# Check whether USER_NAME is already a member of plugdev.
+	if id -nG "${USER_NAME}" 2>/dev/null | tr ' ' '\n' | grep -Fxq plugdev; then
+		echo "OK: ${USER_NAME} is already a member of the plugdev group."
+		return 0
+	fi
+
+	echo ""
+	echo "WARNING: ${USER_NAME} is NOT a member of the plugdev group."
+	echo "RTL-SDR USB devices are typically owned by plugdev, so the watchdog"
+	echo "service may fail with permission errors when accessing the device."
+	echo ""
+	printf "Add %s to the plugdev group now? [Y/n] " "${USER_NAME}"
+	local answer
+	read -r answer </dev/tty
+	answer="${answer:-y}"
+
+	if [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]; then
+		usermod -aG plugdev "${USER_NAME}" || die "Failed to add ${USER_NAME} to plugdev."
+		echo "${USER_NAME} added to plugdev."
+		echo "Note: The systemd service will pick up the new group on next start."
+		echo "      If you also use ${USER_NAME} interactively, a logout/login is required there."
+	else
+		echo "Skipped. You can add ${USER_NAME} to plugdev later with:"
+		echo "  sudo usermod -aG plugdev ${USER_NAME}"
+	fi
+	echo ""
+}
+
 validate_endpoint() {
 	local response
 
@@ -315,6 +350,7 @@ print_summary() {
 main() {
 	parse_args "$@"
 	validate_inputs
+	check_plugdev_membership
 
 	if [[ "${UNINSTALL}" -eq 1 ]]; then
 		disable_and_remove_units

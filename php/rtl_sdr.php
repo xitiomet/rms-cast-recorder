@@ -3883,37 +3883,7 @@ function build_stream_output_url(array $config, array $streamFfmpegSettings): st
 
 function wrap_ffmpeg_stream_command_for_retry(string $ffmpegCommand, array $streamFfmpegSettings): string
 {
-	$retryEnabled = parse_boolean_flag($streamFfmpegSettings['retryEnabled'] ?? true, true);
-	if (!$retryEnabled) {
-		return $ffmpegCommand;
-	}
-
-	$retryDelaySeconds = max(1, min(30, (int)($streamFfmpegSettings['retryDelaySeconds'] ?? 2)));
-	$retryMaxAttempts = max(0, (int)($streamFfmpegSettings['retryMaxAttempts'] ?? 5));
-
-	$scriptLines = array(
-		'attempt=0',
-		'while :; do',
-		'  attempt=$((attempt + 1))',
-		'  ' . $ffmpegCommand,
-		'  ffmpeg_status=$?',
-		'  if [ "$ffmpeg_status" -eq 0 ]; then',
-		'    exit 0',
-		'  fi',
-	);
-
-	if ($retryMaxAttempts > 0) {
-		$scriptLines[] = '  if [ "$attempt" -ge ' . $retryMaxAttempts . ' ]; then';
-		$scriptLines[] = '    echo "[STREAM_RECONNECT] ffmpeg disconnected (exit $ffmpeg_status), reached max retry attempts (' . $retryMaxAttempts . '), giving up." >&2';
-		$scriptLines[] = '    exit "$ffmpeg_status"';
-		$scriptLines[] = '  fi';
-	}
-
-	$scriptLines[] = '  echo "[STREAM_RECONNECT] ffmpeg disconnected (exit $ffmpeg_status), retrying in ' . $retryDelaySeconds . 's (attempt $attempt)." >&2';
-	$scriptLines[] = '  sleep ' . $retryDelaySeconds;
-	$scriptLines[] = 'done';
-
-	return 'sh -c ' . escapeshellarg(implode("\n", $scriptLines));
+	return $ffmpegCommand;
 }
 
 function build_stream_command(array $config): string
@@ -4589,6 +4559,7 @@ function execute_device_scan_command(string $baseCommand): string
 	}
 
 	$fallbackOutput = '';
+	$usingDeviceOutput = '';
 
 	foreach ($commands as $command) {
 		$output = shell_exec('bash -lc ' . escapeshellarg($command));
@@ -4600,12 +4571,17 @@ function execute_device_scan_command(string $baseCommand): string
 			$fallbackOutput = $output;
 		}
 
-		if (
-			preg_match('/Found\s+[0-9]+\s+device\(s\)/i', $output) === 1
-			|| preg_match('/^Using device\s+[0-9]+\s*:/mi', $output) === 1
-		) {
+		if (preg_match('/Found\s+[0-9]+\s+device\(s\)/i', $output) === 1) {
 			return $output;
 		}
+
+		if ($usingDeviceOutput === '' && preg_match('/^Using device\s+[0-9]+\s*:/mi', $output) === 1) {
+			$usingDeviceOutput = $output;
+		}
+	}
+
+	if ($usingDeviceOutput !== '') {
+		return $usingDeviceOutput;
 	}
 
 	return $fallbackOutput;
@@ -6189,6 +6165,18 @@ function inferRxOpenReason(snapshot)
 function normalizeRadioPipeStatusSnapshot(payload, previousSnapshot)
 {
 	var previous = (previousSnapshot && typeof previousSnapshot === 'object') ? previousSnapshot : {};
+	var previousAudioReason = Array.isArray(previous.audioReason) ? previous.audioReason : [];
+	var rawAudioReason = Array.isArray(payload.audioReason) ? payload.audioReason : previousAudioReason;
+	var normalizedAudioReason = [];
+	for (var reasonIndex = 0; reasonIndex < rawAudioReason.length; reasonIndex++) {
+		var reasonValue = String(rawAudioReason[reasonIndex] == null ? '' : rawAudioReason[reasonIndex]).trim().toLowerCase();
+		if (reasonValue === '') {
+			continue;
+		}
+		if (normalizedAudioReason.indexOf(reasonValue) === -1) {
+			normalizedAudioReason.push(reasonValue);
+		}
+	}
 	var payloadHasOutputDb = Object.prototype.hasOwnProperty.call(payload, 'outputDb');
 	var payloadHasRmsDb = Object.prototype.hasOwnProperty.call(payload, 'rmsDb');
 	var payloadHasRms = Object.prototype.hasOwnProperty.call(payload, 'rms');
@@ -6215,6 +6203,7 @@ function normalizeRadioPipeStatusSnapshot(payload, previousSnapshot)
 		rmsDb: normalizeClientRmsDbValue(rawRmsDb),
 		outputDb: normalizeClientRmsDbValue(rawOutputDb),
 		rmsGate: String(payload.rmsGate || previous.rmsGate || '').trim().toLowerCase(),
+		audioReason: normalizedAudioReason,
 		audioDetected: parseClientBooleanFlag(payload.audioDetected, parseClientBooleanFlag(previous.audioDetected, false)),
 		lastOpenReason: String(previous.lastOpenReason || '').trim().toLowerCase(),
 		updatedAt: Date.now()
@@ -8381,6 +8370,52 @@ function splitPipelineCommandStages(commandLine)
 	return stages;
 }
 
+function unwrapShellCommandArgument(commandArgument)
+{
+	var value = String(commandArgument || '').trim();
+	if (value.length < 2) {
+		return value;
+	}
+
+	var quote = value.charAt(0);
+	if ((quote !== "'" && quote !== '"') || value.charAt(value.length - 1) !== quote) {
+		return value;
+	}
+
+	var unwrapped = value.slice(1, -1);
+	if (quote === "'") {
+		unwrapped = unwrapped.replace(/'\\''/g, "'");
+	} else {
+		unwrapped = unwrapped.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+	}
+
+	return unwrapped.trim();
+}
+
+function normalizePipelineCommandForDisplay(commandLine)
+{
+	var raw = String(commandLine || '').trim();
+	if (raw === '') {
+		return '';
+	}
+
+	var shellWrapperMatch = raw.match(/^(?:nohup\s+)?(?:setsid\s+)?(?:\/bin\/)?(?:bash|sh)\s+-[lc]\s+([\s\S]+)$/i);
+	if (!shellWrapperMatch) {
+		return raw;
+	}
+
+	var commandArgument = unwrapShellCommandArgument(shellWrapperMatch[1]);
+	if (commandArgument === '') {
+		return raw;
+	}
+
+	if (commandArgument.indexOf('|') !== -1 || /\brtl_fm\b/i.test(commandArgument) || /\bffmpeg\b/i.test(commandArgument)) {
+		return commandArgument;
+	}
+
+	return raw;
+}
+
 function buildPipelineStagePreviewLines(config)
 {
 	var source = (config && typeof config === 'object') ? config : {};
@@ -8486,7 +8521,7 @@ function buildPipelineStagePreviewLines(config)
 function buildFullPipelineCommandForDeviceCard(instance, config)
 {
 	var runningCommand = (instance && typeof instance === 'object' && typeof instance.command === 'string')
-		? String(instance.command || '').trim()
+		? normalizePipelineCommandForDisplay(String(instance.command || ''))
 		: '';
 	if (runningCommand !== '') {
 		return runningCommand;
@@ -8503,7 +8538,7 @@ function buildFullPipelineCommandForDeviceCard(instance, config)
 function buildPipelineLinesForDeviceCard(instance, config)
 {
 	var runningCommand = (instance && typeof instance === 'object' && typeof instance.command === 'string')
-		? String(instance.command || '').trim()
+		? normalizePipelineCommandForDisplay(String(instance.command || ''))
 		: '';
 	if (runningCommand !== '') {
 		var runningStages = splitPipelineCommandStages(runningCommand);
@@ -8728,7 +8763,7 @@ function parseImportedTemplatePayload(rawValue)
 	normalizedTemplate.templateName = name;
 	return {
 		name: name,
-		template: normalizedTemplate,
+		config: normalizedTemplate,
 	};
 }
 
@@ -8736,31 +8771,31 @@ function parseImportedTemplatesPayload(rawValue)
 {
 	var importedByName = {};
 
-	var addImportedTemplate = function (rawTemplate, fallbackName) {
-		var candidate = rawTemplate;
-		var fallback = String(fallbackName || '').trim();
-		if (fallback !== '') {
-			if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-				candidate = { templateName: fallback, template: candidate };
-			} else {
-				candidate = Object.assign({}, candidate, { templateName: fallback });
-			}
+	function addImportedTemplate(candidate, fallbackName)
+	{
+		var parsed = parseImportedTemplatePayload(candidate);
+		var parsedName = String(parsed && parsed.name ? parsed.name : '').trim();
+		if (parsedName === '') {
+			parsedName = String(fallbackName || '').trim();
+		}
+		if (parsedName === '') {
+			parsedName = 'Imported Template';
 		}
 
-		var imported = parseImportedTemplatePayload(candidate);
-		importedByName[imported.name] = imported.template;
-	};
+		var parsedConfig = (parsed && parsed.config && typeof parsed.config === 'object' && !Array.isArray(parsed.config))
+			? parsed.config
+			: {};
+		var normalized = sanitizeTemplateConfig(parsedConfig);
+		normalized.templateName = parsedName;
+		importedByName[parsedName] = normalized;
+	}
 
 	if (Array.isArray(rawValue)) {
 		for (var i = 0; i < rawValue.length; i++) {
 			addImportedTemplate(rawValue[i], '');
 		}
 	} else if (rawValue && typeof rawValue === 'object') {
-		if (Array.isArray(rawValue.templates)) {
-			for (var j = 0; j < rawValue.templates.length; j++) {
-				addImportedTemplate(rawValue.templates[j], '');
-			}
-		} else if (rawValue.templates && typeof rawValue.templates === 'object' && !Array.isArray(rawValue.templates)) {
+		if (rawValue.templates && typeof rawValue.templates === 'object' && !Array.isArray(rawValue.templates)) {
 			for (var mapName in rawValue.templates) {
 				if (!Object.prototype.hasOwnProperty.call(rawValue.templates, mapName)) {
 					continue;
@@ -9058,12 +9093,22 @@ function getRxIndicator(deviceId, isRunning, config)
 
 	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
 	if (!snapshot || !snapshot.hasStatus) {
-		return { label: 'Rx Idle', className: 'rx-idle' };
+		return { label: 'Rx IDLE', className: 'rx-idle' };
 	}
 
-	var gateState = String(snapshot.gate || '').trim().toLowerCase();
-	if (gateState !== 'open') {
-		return { label: 'Rx Idle', className: 'rx-idle' };
+	var audioReason = Array.isArray(snapshot.audioReason) ? snapshot.audioReason : [];
+	if (audioReason.length === 0) {
+		return { label: 'Rx IDLE', className: 'rx-idle' };
+	}
+
+	if (audioReason.indexOf('dcs') !== -1) {
+		return { label: 'Rx DCS', className: 'rx-active' };
+	}
+	if (audioReason.indexOf('ctcss') !== -1) {
+		return { label: 'Rx CTCSS', className: 'rx-active' };
+	}
+	if (audioReason.indexOf('rms') !== -1) {
+		return { label: 'Rx AUDIO', className: 'rx-active' };
 	}
 
 	var openReason = inferRxOpenReason(snapshot);
@@ -9074,7 +9119,7 @@ function getRxIndicator(deviceId, isRunning, config)
 		return { label: 'Rx CTCSS', className: 'rx-active' };
 	}
 
-	return { label: 'Rx Audio', className: 'rx-active' };
+	return { label: 'Rx AUDIO', className: 'rx-active' };
 }
 
 function getConfiguredSilenceFloorDb(deviceId)
