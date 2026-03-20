@@ -160,7 +160,7 @@ public class RadioPipeMain
             }
             double gateHoldSeconds;
             try {
-                gateHoldSeconds = Double.parseDouble(cmd.getOptionValue("gate-hold", "1"));
+                gateHoldSeconds = Double.parseDouble(cmd.getOptionValue("gate-hold", "0"));
             } catch (NumberFormatException nfe) {
                 throw new ParseException("gate-hold must be a numeric value in seconds");
             }
