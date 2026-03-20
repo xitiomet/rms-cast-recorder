@@ -5733,8 +5733,57 @@ if ($action !== '') {
 		.device-title-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
 		.device-rms-stack { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; min-width: 0; width: 100%; }
 		.device-rms-meter { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; width: 100%; }
-		.device-rms-track { flex: 1 1 auto; width: 100%; min-width: 0; height: 8px; border-radius: 999px; overflow: hidden; border: 1px solid var(--border); background: var(--input); }
-		.device-rms-fill { width: 0%; height: 100%; transition: width 0.18s ease, background-color 0.18s ease, opacity 0.18s ease; background: var(--muted); }
+		.device-rms-track {
+			position: relative;
+			flex: 1 1 auto;
+			width: 100%;
+			min-width: 0;
+			height: 9px;
+			border-radius: 999px;
+			overflow: hidden;
+			border: 1px solid var(--border);
+			background: linear-gradient(to bottom, var(--panel-strong), var(--input));
+		}
+		.device-rms-track::after {
+			content: "";
+			position: absolute;
+			inset: 0;
+			pointer-events: none;
+			background: repeating-linear-gradient(
+				90deg,
+				transparent 0,
+				transparent calc(10% - 1px),
+				var(--border) calc(10% - 1px),
+				var(--border) 10%
+			);
+			opacity: 0.85;
+		}
+		.device-rms-fill {
+			position: relative;
+			width: 0%;
+			height: 100%;
+			transition: width 0.18s ease, background-color 0.18s ease, opacity 0.18s ease;
+			background: var(--muted);
+		}
+		.device-rms-fill::before {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background: linear-gradient(to bottom, var(--panel-strong), transparent);
+			opacity: 0.25;
+			pointer-events: none;
+		}
+		.device-rms-fill::after {
+			content: "";
+			position: absolute;
+			right: 0;
+			top: 0;
+			bottom: 0;
+			width: 2px;
+			background: var(--text);
+			opacity: 0.28;
+			pointer-events: none;
+		}
 		.device-rms-meter.rms-off .device-rms-fill { background: var(--muted); opacity: 0.45; }
 		.device-rms-meter.rms-idle .device-rms-fill { background: var(--muted); opacity: 0.7; }
 		.device-rms-meter.rms-low .device-rms-fill { background: var(--danger); opacity: 0.95; }
@@ -6256,8 +6305,22 @@ function applyRmsBarIndicator(deviceId, runningOverride)
 			return;
 		}
 
+		var nextPercent = isFinite(indicator.percent) ? Math.max(0, Math.min(100, indicator.percent)) : 0;
+		var lastPercent = Number(fill.getAttribute('data-last-percent'));
+		if (!isFinite(lastPercent)) {
+			var currentWidth = parseFloat(String(fill.style.width || '0'));
+			lastPercent = isFinite(currentWidth) ? currentWidth : nextPercent;
+		}
+
+		var isDecay = nextPercent < (lastPercent - 0.05);
+		var isOutputMeter = meterSelector === '.device-rms-meter-output';
+		var decayDurationMs = isOutputMeter ? 120 : 170;
+		fill.style.transitionDuration = isDecay ? String(decayDurationMs) + 'ms' : '180ms';
+		fill.style.transitionTimingFunction = isDecay ? 'linear' : 'ease-out';
+
 		label.textContent = indicator.label;
-		fill.style.width = String(indicator.percent.toFixed(1)) + '%';
+		fill.style.width = String(nextPercent.toFixed(1)) + '%';
+		fill.setAttribute('data-last-percent', String(nextPercent.toFixed(3)));
 		meter.classList.remove('rms-off');
 		meter.classList.remove('rms-idle');
 		meter.classList.remove('rms-low');
@@ -9050,17 +9113,17 @@ function getConfiguredSilenceFloorDb(deviceId)
 function getRmsDbIndicator(deviceId, isRunning)
 {
 	if (!isRunning) {
-		return { label: 'RMS Off', className: 'rms-off', percent: 0 };
+		return { label: 'RMS IN OFF', className: 'rms-off', percent: 0 };
 	}
 
 	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
 	if (!snapshot || !snapshot.hasStatus) {
-		return { label: 'RMS --', className: 'rms-idle', percent: 0 };
+		return { label: 'RMS IN --', className: 'rms-idle', percent: 0 };
 	}
 
 	var rmsDb = normalizeClientRmsDbValue(snapshot.rmsDb);
 	if (rmsDb === null) {
-		return { label: 'RMS --', className: 'rms-idle', percent: 0 };
+		return { label: 'RMS IN --', className: 'rms-idle', percent: 0 };
 	}
 
 	var minRmsDb = getConfiguredSilenceFloorDb(deviceId);
@@ -9082,7 +9145,7 @@ function getRmsDbIndicator(deviceId, isRunning)
 	}
 
 	return {
-		label: 'RMS ' + rmsDb.toFixed(1) + ' dB',
+		label: 'RMS IN ' + rmsDb.toFixed(1) + ' dB',
 		className: className,
 		percent: percent
 	};
@@ -9091,12 +9154,12 @@ function getRmsDbIndicator(deviceId, isRunning)
 function getRmsIndicator(deviceId, isRunning)
 {
 	if (!isRunning) {
-		return { label: 'Out Off', className: 'rms-off', percent: 0 };
+		return { label: 'RMS OUT OFF', className: 'rms-off', percent: 0 };
 	}
 
 	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
 	if (!snapshot || !snapshot.hasStatus) {
-		return { label: 'Out --', className: 'rms-idle', percent: 0 };
+		return { label: 'RMS OUT --', className: 'rms-idle', percent: 0 };
 	}
 
 	// Prefer outputDb if present, else rmsDb
@@ -9107,7 +9170,7 @@ function getRmsIndicator(deviceId, isRunning)
 		rmsDb = normalizeClientRmsDbValue(snapshot.rmsDb);
 	}
 	if (rmsDb === null) {
-		return { label: 'Out --', className: 'rms-idle', percent: 0 };
+		return { label: 'RMS OUT --', className: 'rms-idle', percent: 0 };
 	}
 
 	var minRmsDb = getConfiguredSilenceFloorDb(deviceId);
@@ -9129,7 +9192,7 @@ function getRmsIndicator(deviceId, isRunning)
 	}
 
 	return {
-		label: 'Out ' + rmsDb.toFixed(1) + ' dB',
+		label: 'RMS OUT ' + rmsDb.toFixed(1) + ' dB',
 		className: className,
 		percent: percent
 	};
