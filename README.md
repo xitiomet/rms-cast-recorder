@@ -187,11 +187,14 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
 4. Audio is processed in small chunks and evaluated by the gate stages described below.
 5. If the gate is open, audio is counted as active sound and starts or continues a clip.
 6. If a clip is already open and the gate closes, RadioPipe keeps appending the non-passing tail until the configured silence timeout expires, then closes the clip.
-7. When a clip closes:
+7. Post-gate gain is applied before output when configured:
+  * `--gain <dB>` adds fixed gain (or attenuation)
+  * `--auto-gain` adds automatic boost toward a target loudness
+8. When a clip closes:
   * file output writes a WAV file under the recordings directory if `-o` is enabled
   * `--stdout` writes the finished clip to stdout as WAV
   * `--on-write` runs after a file clip is written
-8. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
+9. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
 
 ### Gate stages in evaluation order
 
@@ -345,6 +348,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
+* **Post-gate gain**: `--gain`, `--auto-gain`
 * **Naming/automation**: `-n`, `-x`
 * **WebSocket API**: `--api-websocket`
 
@@ -376,6 +380,8 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
+* --gain <DB> – fixed post-gate gain in dB before recording/stdout (range `-60` to `+60`, default `0`)
+* --auto-gain – enable automatic post-gate boost toward target level (applies after gates, before recording/stdout)
 * --api-websocket <HOST:PORT> – start embedded websocket API server and publish recorder events (example `0.0.0.0:9000`)
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
@@ -403,6 +409,10 @@ When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16`).
 When using both --dcs and --ctcss, both gates must match for clips to open.
 
 `--gate-hold` adds extra hold time after DCS/CTCSS detection loss to prevent brief weak/noisy decode dropouts from closing the gate immediately (default `0` second).
+
+`--gain` applies fixed post-gate gain (or attenuation) after gate decisions and before recording/stdout output.
+
+`--auto-gain` adds automatic post-gate boost on passing audio frames; it can be combined with `--gain`.
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 

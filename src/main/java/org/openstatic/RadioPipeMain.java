@@ -81,6 +81,10 @@ public class RadioPipeMain
             .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
         options.addOption(Option.builder().longOpt("gate-hold").hasArg().argName("SECONDS")
             .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 0)").build());
+        options.addOption(Option.builder().longOpt("gain").hasArg().argName("DB")
+            .desc("Apply fixed post-gate gain in dB before recording/stdout (range -60 to +60, default 0)").build());
+        options.addOption(Option.builder().longOpt("auto-gain")
+            .desc("Enable automatic post-gate gain boost toward a target level").build());
         options.addOption(Option.builder().longOpt("api-websocket").hasArg().argName("HOST:PORT")
             .desc("Enable websocket API server at host:port (example: 0.0.0.0:9000)").build());
 
@@ -169,6 +173,13 @@ public class RadioPipeMain
             } catch (NumberFormatException nfe) {
                 throw new ParseException("gate-hold must be a numeric value in seconds");
             }
+            double gainDb;
+            try {
+                gainDb = Double.parseDouble(cmd.getOptionValue("gain", "0"));
+            } catch (NumberFormatException nfe) {
+                throw new ParseException("gain must be a numeric value in dB");
+            }
+            boolean autoGain = cmd.hasOption("auto-gain");
             AudioFormat stdoutRawFormat = null;
 
             if (outputSampleRate <= 0) {
@@ -191,6 +202,12 @@ public class RadioPipeMain
             }
             if (gateHoldSeconds < 0) {
                 throw new ParseException("gate-hold must be >= 0 seconds");
+            }
+            if (!Double.isFinite(gainDb)) {
+                throw new ParseException("gain must be a finite numeric value in dB");
+            }
+            if (gainDb < -60.0 || gainDb > 60.0) {
+                throw new ParseException("gain must be between -60 and +60 dB");
             }
             if (stdoutPadDelayMs < 0) {
                 throw new ParseException("stdout-pad-delay must be >= 0 milliseconds");
@@ -314,6 +331,7 @@ public class RadioPipeMain
             }
             recorder.setInputDejitterMillis(inputDejitterMs);
             recorder.setGateHoldSeconds(gateHoldSeconds);
+            recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setApiWebSocketServer(apiWebSocketServer);
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;

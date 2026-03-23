@@ -149,7 +149,7 @@ Fields:
 - `ctcssGate`: `open` or `closed`
 - `rmsGate`: RMS/silence gate (`open` when audio is loud enough, `closed` when silent)
 - `rmsDb`: current RMS level in decibels (dB)
-- `outputDb`: RMS level after all gates. Equals `rmsDb` when audio passes all gates; otherwise `-100.0`
+- `outputDb`: RMS level after all gates and post-gate gain (`--gain` / `--auto-gain`) on passing audio; otherwise `-100.0`
 - `gate`: overall gate state (open only if all gates open)
 - `gateReason`: blocker for overall gate (`dcs`, `ctcss`, `silence`, or `none` when open); precedence is `dcs -> ctcss -> silence`
 - `gateSeconds`: seconds since the overall gate entered its current state

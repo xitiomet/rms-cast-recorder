@@ -46,6 +46,8 @@ public class StreamRecorder {
     private static final long STDOUT_READ_POLL_MILLIS = 20L;
     private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
     private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
+    private static final double AUTO_GAIN_TARGET_DB = -12.0;
+    private static final double AUTO_GAIN_MAX_DB = 30.0;
     private final URL streamUrl;
     private final InputStream stdinInput;
     private final boolean stdinMode;
@@ -76,6 +78,8 @@ public class StreamRecorder {
     private volatile long stdoutPadDelayMillis;
     private volatile boolean stdoutRawConversionWarned;
     private volatile boolean stdoutConfigLogged;
+    private volatile double outputGainDb;
+    private volatile boolean autoGainEnabled;
     private volatile ApiWebSocketServer apiWebSocketServer;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
@@ -206,6 +210,8 @@ public class StreamRecorder {
         this.stdoutPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
         this.stdoutRawConversionWarned = false;
         this.stdoutConfigLogged = false;
+        this.outputGainDb = 0.0;
+        this.autoGainEnabled = false;
         this.apiWebSocketServer = null;
     }
 
@@ -285,6 +291,17 @@ public class StreamRecorder {
 
     public void setApiWebSocketServer(ApiWebSocketServer apiWebSocketServer) {
         this.apiWebSocketServer = apiWebSocketServer;
+    }
+
+    public void setGainControl(double gainDb, boolean autoGainEnabled) {
+        if (!Double.isFinite(gainDb)) {
+            throw new IllegalArgumentException("gain must be a finite numeric value in dB");
+        }
+        if (gainDb < -60.0 || gainDb > 60.0) {
+            throw new IllegalArgumentException("gain must be between -60 and +60 dB");
+        }
+        this.outputGainDb = gainDb;
+        this.autoGainEnabled = autoGainEnabled;
     }
 
     private boolean canWriteRecordings() {
@@ -415,6 +432,7 @@ public class StreamRecorder {
             logDcsConfiguration();
             logCtcssConfiguration();
             logStdoutConfiguration(activeOutputFormat);
+            logGainConfiguration();
             processStream(din, decodedFormat, activeOutputFormat);
         }
     }
@@ -744,7 +762,22 @@ public class StreamRecorder {
             statusGateReason = currentGateBlockReason;
 
             boolean gateAllowsAudio = dcsMatch && ctcssMatch && rmsGateOpen;
-            statusOutputDb = gateAllowsAudio ? currentRmsDb : -100.0;
+            boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
+            if (includeFrameInClip) {
+                double frameGainDb = this.outputGainDb;
+                if (this.autoGainEnabled && gateAllowsAudio) {
+                    double neededAutoGainDb = AUTO_GAIN_TARGET_DB - currentRmsDb;
+                    double boundedAutoGainDb = Math.max(0.0, Math.min(AUTO_GAIN_MAX_DB, neededAutoGainDb));
+                    frameGainDb += boundedAutoGainDb;
+                }
+                applyGainInPlace(currentBuffer, n, processingFormat, frameGainDb);
+            }
+
+            if (gateAllowsAudio) {
+                statusOutputDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
+            } else {
+                statusOutputDb = -100.0;
+            }
             if (statusAudioDetected != gateAllowsAudio) {
                 statusAudioDetected = gateAllowsAudio;
                 statusAudioDetectedSinceNanos = nowNanos;
@@ -775,7 +808,6 @@ public class StreamRecorder {
                     this.stdinMode,
                     processingFormat,
                     this.baseDir);
-            boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
             if (this.stdoutEnabled && this.stdoutRawMode) {
                 if (this.stdoutPadMode) {
                     byte[] stdoutFrame = includeFrameInClip
@@ -903,6 +935,61 @@ public class StreamRecorder {
         }
 
         this.stdoutConfigLogged = true;
+    }
+
+    private void logGainConfiguration() {
+        if (Math.abs(this.outputGainDb) > 0.001) {
+            log("GAIN", ANSI_CYAN,
+                    String.format(Locale.US,
+                            "Manual post-gate gain enabled: %+.1f dB.",
+                            this.outputGainDb));
+        }
+        if (this.autoGainEnabled) {
+            log("GAIN", ANSI_CYAN,
+                    String.format(Locale.US,
+                            "Auto-gain enabled: target %.1f dB, max boost %.1f dB.",
+                            AUTO_GAIN_TARGET_DB,
+                            AUTO_GAIN_MAX_DB));
+        }
+    }
+
+    private static void applyGainInPlace(byte[] data, int len, AudioFormat format, double gainDb) {
+        if (len <= 0 || Math.abs(gainDb) <= 0.0001) {
+            return;
+        }
+        if (format.getSampleSizeInBits() != 16) {
+            return;
+        }
+
+        boolean bigEndian = format.isBigEndian();
+        double gain = Math.pow(10.0, gainDb / 20.0);
+        for (int offset = 0; offset + 1 < len; offset += 2) {
+            int sample;
+            if (bigEndian) {
+                int hi = data[offset];
+                int lo = data[offset + 1] & 0xff;
+                sample = (hi << 8) | lo;
+            } else {
+                int lo = data[offset] & 0xff;
+                int hi = data[offset + 1];
+                sample = (hi << 8) | lo;
+            }
+
+            int amplified = (int) Math.round(sample * gain);
+            if (amplified > 32767) {
+                amplified = 32767;
+            } else if (amplified < -32768) {
+                amplified = -32768;
+            }
+
+            if (bigEndian) {
+                data[offset] = (byte) ((amplified >>> 8) & 0xFF);
+                data[offset + 1] = (byte) (amplified & 0xFF);
+            } else {
+                data[offset] = (byte) (amplified & 0xFF);
+                data[offset + 1] = (byte) ((amplified >>> 8) & 0xFF);
+            }
+        }
     }
 
     private void writeChunkToStdoutWav(byte[] audioData, AudioFormat sourceFormat, AudioFormat targetFormat) {
