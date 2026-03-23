@@ -3250,6 +3250,19 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		throw new RuntimeException('Threshold must be between -120 and 0 dB.');
 	}
 
+	$postGain = trim((string)($input['postGain'] ?? ($input['radioPipeGain'] ?? '')));
+	if ($postGain !== '') {
+		if (!preg_match('/^-?[0-9]+(?:\.[0-9]+)?$/', $postGain)) {
+			throw new RuntimeException('radio-pipe gain must be numeric.');
+		}
+		$postGainValue = (float)$postGain;
+		if ($postGainValue < -60.0 || $postGainValue > 60.0) {
+			throw new RuntimeException('radio-pipe gain must be between -60 and 60 dB.');
+		}
+	}
+
+	$autoGainEnabled = parse_boolean_flag($input['autoGain'] ?? ($input['radioPipeAutoGain'] ?? '0'), false);
+
 	$silence = trim((string)($input['silence'] ?? '2'));
 	$silenceValue = 2.0;
 	if ($silence !== '') {
@@ -3441,6 +3454,8 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'gain' => $gain,
 		'biasT' => $biasTEnabled ? 1 : 0,
 		'threshold' => $thresholdValue,
+		'postGain' => $postGain,
+		'autoGain' => $autoGainEnabled ? 1 : 0,
 		'silence' => $silenceValue,
 		'outputMode' => $outputMode,
 		'recordEnabled' => $recordEnabled,
@@ -3575,6 +3590,50 @@ function radio_pipe_supports_ctcss(): bool
 	return $supports;
 }
 
+function radio_pipe_supports_post_gain(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('radio-pipe')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--gain') !== false;
+	return $supports;
+}
+
+function radio_pipe_supports_auto_gain(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('radio-pipe')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--auto-gain') !== false;
+	return $supports;
+}
+
 function radio_pipe_supports_api_websocket(): bool
 {
 	static $supports = null;
@@ -3673,7 +3732,7 @@ function get_radio_pipe_api_websocket_options(array $config): array
 	);
 }
 
-function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0, string $apiWebsocketAddress = ''): string
+function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0, string $apiWebsocketAddress = '', array $config = array()): string
 {
 	$conditionerCommand = array(
 		'radio-pipe',
@@ -3718,6 +3777,16 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		$conditionerCommand[] = $ctcssTone;
 	}
 
+	$postGain = trim((string)($config['postGain'] ?? ''));
+	if ($postGain !== '') {
+		$conditionerCommand[] = '--gain';
+		$conditionerCommand[] = $postGain;
+	}
+
+	if (parse_boolean_flag($config['autoGain'] ?? 0, false)) {
+		$conditionerCommand[] = '--auto-gain';
+	}
+
 	array_push(
 		$conditionerCommand,
 		'--stdout',
@@ -3753,7 +3822,7 @@ function build_stream_input_conditioner_command(array $config): string
 	// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
 	// Threshold/silence values keep the gate effectively open while stdout pad
 	// smooths upstream rtl_fm stalls.
-	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs, $streamSampleRate, $apiWebsocketAddress);
+	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs, $streamSampleRate, $apiWebsocketAddress, $config);
 }
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
@@ -3809,6 +3878,16 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 	if ($ctcssTone !== '') {
 		$recorderCommand[] = '--ctcss';
 		$recorderCommand[] = $ctcssTone;
+	}
+
+	$postGain = trim((string)($config['postGain'] ?? ''));
+	if ($postGain !== '') {
+		$recorderCommand[] = '--gain';
+		$recorderCommand[] = $postGain;
+	}
+
+	if (parse_boolean_flag($config['autoGain'] ?? 0, false)) {
+		$recorderCommand[] = '--auto-gain';
 	}
 
 	$afterRecordHook = build_after_record_hook_argument($config);
@@ -4286,6 +4365,8 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		return array('ok' => false, 'error' => (string)($bindingResult['error'] ?? 'Failed to resolve runtime device binding.'));
 	}
 	$config = $bindingResult['config'];
+	$postGain = trim((string)($config['postGain'] ?? ''));
+	$autoGainEnabled = parse_boolean_flag($config['autoGain'] ?? 0, false);
 	$recordEnabled = config_records_enabled($config);
 	$streamEnabled = config_stream_enabled($config);
 	$uploadModeEnabled =
@@ -4316,6 +4397,14 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 
 	if ($ctcssTone !== '' && !radio_pipe_supports_ctcss()) {
 		return array('ok' => false, 'error' => 'CTCSS is configured but this radio-pipe build does not support --ctcss.');
+	}
+
+	if ($postGain !== '' && !radio_pipe_supports_post_gain()) {
+		return array('ok' => false, 'error' => 'radio-pipe gain is configured but this radio-pipe build does not support --gain.');
+	}
+
+	if ($autoGainEnabled && !radio_pipe_supports_auto_gain()) {
+		return array('ok' => false, 'error' => 'radio-pipe auto gain is configured but this radio-pipe build does not support --auto-gain.');
 	}
 
 	if ($streamEnabled && !$recorderSupportsStdoutPad) {
@@ -8024,6 +8113,7 @@ function isStreamOutputEnabled(config)
 function sanitizeTemplateConfig(config)
 {
 	var clean = applyClientOutputSelection(Object.assign({}, config || {}));
+	delete clean.biasT;
 	delete clean.device;
 	delete clean.deviceIndex;
 	delete clean.deviceSerial;
@@ -8032,6 +8122,8 @@ function sanitizeTemplateConfig(config)
 	delete clean.streamMountLinkMode;
 	clean.dcs = normalizeClientDcsCode(clean.dcs);
 	clean.ctcss = normalizeClientCtcssTone(clean.ctcss);
+	clean.postGain = normalizeClientPostGainValue(clean.postGain);
+	clean.autoGain = parseClientBooleanFlag(clean.autoGain, false) ? '1' : '0';
 	clean.streamFormat = String(clean.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	clean.streamName = String(clean.streamName || '');
 	var templateFollowName = parseClientBooleanFlag(
@@ -8056,11 +8148,15 @@ function applyTemplateToDevice(deviceId, templateName, currentConfigOverride)
 	current.deviceIndex = normalizeClientDeviceIndex(String(current.deviceIndex || getDeviceIndexForId(deviceId) || ''));
 	var currentLinkMode = resolveMountLinkModeForConfig(current, current.deviceIndex || getDeviceIndexForId(deviceId));
 	var currentFollowDevice = currentLinkMode === 'device';
+	var currentBiasT = isBiasTEnabledValue(current.biasT) ? '1' : '0';
 	var merged = Object.assign({}, current, settingsTemplates[name]);
+	merged.biasT = currentBiasT;
 	merged.device = String(deviceId);
 	merged.deviceIndex = normalizeClientDeviceIndex(String(getDeviceIndexForId(deviceId) || merged.deviceIndex || ''));
 	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
+	merged.postGain = normalizeClientPostGainValue(merged.postGain);
+	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamName = String(merged.streamName || '');
 	var templateFollowName = parseClientBooleanFlag(
@@ -8137,6 +8233,8 @@ function getDefaultConfig(deviceId)
 		ctcss: '',
 		biasT: '0',
 		threshold: '-40',
+		postGain: '',
+		autoGain: '0',
 		silence: '2',
 		outputMode: 'recorder',
 		recordEnabled: true,
@@ -8209,6 +8307,22 @@ function normalizeClientSquelchValue(value)
 		return '1';
 	}
 	return raw;
+}
+
+function normalizeClientPostGainValue(value)
+{
+	var raw = String(value == null ? '' : value).trim();
+	if (raw === '') {
+		return '';
+	}
+	if (!/^-?\d+(?:\.\d+)?$/.test(raw)) {
+		return '';
+	}
+	var parsed = Number(raw);
+	if (!isFinite(parsed) || parsed < -60 || parsed > 60) {
+		return '';
+	}
+	return String(parsed);
 }
 
 function isBiasTEnabledValue(value)
@@ -8485,6 +8599,8 @@ function buildPipelineStagePreviewLines(config)
 
 	var dcsCode = normalizeClientDcsCode(source.dcs);
 	var ctcssTone = normalizeClientCtcssTone(source.ctcss);
+	var postGain = normalizeClientPostGainValue(source.postGain);
+	var autoGainEnabled = parseClientBooleanFlag(source.autoGain, false);
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
 		var recorderBothLine = 'radio-pipe --stdin';
 		if (rmsInputDejitterMs > 0) {
@@ -8500,6 +8616,12 @@ function buildPipelineStagePreviewLines(config)
 		if (ctcssTone !== '') {
 			recorderBothLine += ' --ctcss ' + ctcssTone;
 		}
+		if (postGain !== '') {
+			recorderBothLine += ' --gain ' + postGain;
+		}
+		if (autoGainEnabled) {
+			recorderBothLine += ' --auto-gain';
+		}
 		lines.push(recorderBothLine);
 	} else if (outputSelection.streamEnabled) {
 		var conditionerLine = 'radio-pipe --stdin';
@@ -8514,6 +8636,12 @@ function buildPipelineStagePreviewLines(config)
 		if (ctcssTone !== '') {
 			conditionerLine += ' --ctcss ' + ctcssTone;
 		}
+		if (postGain !== '') {
+			conditionerLine += ' --gain ' + postGain;
+		}
+		if (autoGainEnabled) {
+			conditionerLine += ' --auto-gain';
+		}
 		lines.push(conditionerLine);
 	} else {
 		var recorderLine = 'radio-pipe --stdin';
@@ -8524,6 +8652,12 @@ function buildPipelineStagePreviewLines(config)
 		}
 		if (ctcssTone !== '') {
 			recorderLine += ' --ctcss ' + ctcssTone;
+		}
+		if (postGain !== '') {
+			recorderLine += ' --gain ' + postGain;
+		}
+		if (autoGainEnabled) {
+			recorderLine += ' --auto-gain';
 		}
 		var afterRecordAction = String(source.afterRecordAction || 'none').toLowerCase();
 		if (afterRecordAction !== '' && afterRecordAction !== 'none') {
@@ -9669,6 +9803,8 @@ function getConfigForDevice(deviceId)
 	merged.deviceIndex = normalizeClientDeviceIndex(String(merged.deviceIndex || descriptor.index || ''));
 	merged.rtlBandwidth = String(merged.rtlBandwidth || '12000');
 	merged.squelch = normalizeClientSquelchValue(merged.squelch);
+	merged.postGain = normalizeClientPostGainValue(merged.postGain);
+	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
 	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
@@ -10168,7 +10304,7 @@ function renderDeviceList()
 					'</div>' +
 					'<div class="form-row">' +
 						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
-						'<div><label>Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
+						'<div><label>RTL Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>DCS Gate</label><select class="field-dcs">' + buildDcsOptions(String(config.dcs || '')) + '</select></div>' +
@@ -10176,16 +10312,20 @@ function renderDeviceList()
 					'<div class="form-row single">' +
 						'<div><label>CTCSS Gate</label><select class="field-ctcss">' + buildCtcssOptions(String(config.ctcss || '')) + '</select></div>' +
 					'</div>' +
+					'<div class="form-row">' +
+						'<div><label>Audio Threshold (dB)</label><input type="text" class="field-threshold" value="' + escapeHtml(String(config.threshold || '-40')) + '" placeholder="-40 recommended start"></div>' +
+						'<div><label>Silence (sec)</label><input type="text" class="field-silence" value="' + escapeHtml(String(config.silence || '2')) + '"></div>' +
+					'</div>' +
 					'<div class="form-row single">' +
-						'<div><label>Bias-T</label><select class="field-bias-t"><option value="0">Disabled</option><option value="1">Enabled</option></select></div>' +
+						'<div><label>Bias-T <span style="font-size:12px;opacity:0.8;">(device-local, not in templates)</span></label><select class="field-bias-t"><option value="0">Disabled</option><option value="1">Enabled</option></select></div>' +
 					'</div>' +
 					'<div class="form-row">' +
 						'<div><label class="checkbox-label"><input type="checkbox" class="field-record-enabled"> Enable Recording</label></div>' +
 						'<div><label class="checkbox-label"><input type="checkbox" class="field-stream-enabled"> Enable Streaming</label></div>' +
 					'</div>' +
-					'<div class="form-row output-recorder-only">' +
-						'<div><label>Threshold (dB)</label><input type="text" class="field-threshold" value="' + escapeHtml(String(config.threshold || '-40')) + '" placeholder="-40 recommended start"></div>' +
-						'<div><label>Silence (sec)</label><input type="text" class="field-silence" value="' + escapeHtml(String(config.silence || '2')) + '"></div>' +
+					'<div class="form-row">' +
+						'<div><label>radio-pipe Gain (dB)</label><input type="text" class="field-post-gain" value="' + escapeHtml(String(config.postGain || '')) + '" placeholder="Optional: -60 to 60"></div>' +
+						'<div><label class="checkbox-label"><input type="checkbox" class="field-auto-gain"' + (parseClientBooleanFlag(config.autoGain, false) ? ' checked' : '') + '> Enable radio-pipe Auto Gain</label></div>' +
 					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
 						'<div><label>Stream Format</label><select class="field-stream-format"><option value="mp3">mp3</option><option value="ogg">ogg</option></select></div>' +
@@ -10462,6 +10602,8 @@ function readCardConfig(card)
 		),
 		squelch: normalizeClientSquelchValue(card.querySelector('.field-squelch').value),
 		gain: card.querySelector('.field-gain').value.trim(),
+		postGain: normalizeClientPostGainValue(card.querySelector('.field-post-gain').value),
+		autoGain: !!(card.querySelector('.field-auto-gain') && card.querySelector('.field-auto-gain').checked) ? '1' : '0',
 		dcs: dcsCode,
 		ctcss: ctcssTone,
 		biasT: card.querySelector('.field-bias-t').value.trim(),
@@ -10671,9 +10813,17 @@ function bindDeviceCard(card)
 	var afterRecordSelect = card.querySelector('.field-after-record-action');
 	var recordingServerSelect = card.querySelector('.field-recording-server-id');
 	var postCommandArgInput = card.querySelector('.field-post-command-arg');
+	var postGainInput = card.querySelector('.field-post-gain');
+	var autoGainCheckbox = card.querySelector('.field-auto-gain');
 	var storedConfig = getConfigForDevice(deviceId);
 	modeSelect.value = storedConfig.mode || 'fm';
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
+	if (postGainInput) {
+		postGainInput.value = normalizeClientPostGainValue(storedConfig.postGain);
+	}
+	if (autoGainCheckbox) {
+		autoGainCheckbox.checked = parseClientBooleanFlag(storedConfig.autoGain, false);
+	}
 	if (biasTSelect) {
 		biasTSelect.value = isBiasTEnabledValue(storedConfig.biasT) ? '1' : '0';
 	}
