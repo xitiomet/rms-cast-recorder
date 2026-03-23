@@ -455,6 +455,8 @@ public class StreamRecorder {
         String statusDetectedDcsPolarity = null;
         int statusDcsConfidence = 0;
         String statusDetectedCtcssLabel = null;
+        String lastUngatedDcsLabel = null;
+        String lastUngatedDcsPolarity = null;
         long nextStatusEmitNanos = statusClockNanos + TimeUnit.MILLISECONDS.toNanos(250L);
 
         int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
@@ -641,6 +643,24 @@ public class StreamRecorder {
             statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
             statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
             statusDcsConfidence = dcsStatusDetector.getConfidenceScore();
+
+            if (!dcsGateEnabled) {
+                if (statusDetectedDcsLabel != null) {
+                    if (!sameNullableText(statusDetectedDcsLabel, lastUngatedDcsLabel)
+                            || !sameNullableText(statusDetectedDcsPolarity, lastUngatedDcsPolarity)) {
+                        log("DCS", ANSI_CYAN,
+                                "DCS " + statusDetectedDcsLabel
+                                        + " detected (" + statusDetectedDcsPolarity
+                                        + "), gate not configured.");
+                    }
+                } else if (lastUngatedDcsLabel != null) {
+                    log("DCS", ANSI_YELLOW,
+                            "DCS " + lastUngatedDcsLabel + " no longer detected.");
+                }
+
+                lastUngatedDcsLabel = statusDetectedDcsLabel;
+                lastUngatedDcsPolarity = statusDetectedDcsPolarity;
+            }
 
             boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, processingFormat);
             if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
