@@ -197,23 +197,23 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
 
 Each chunk is checked in this order:
 
-1. RMS silence gate
-  * The chunk RMS level is measured in dB.
-  * If it is below the configured silence threshold, the chunk is blocked immediately.
-  * This is the first blocking condition and its status reason is `silence`.
-2. DCS gate, if `--dcs` is configured
+1. DCS gate, if `--dcs` is configured
   * The chunk is checked for the required DCS code.
   * If the code was recently present and `--gate-hold` is greater than `0`, the DCS gate can stay open for the grace period.
   * If this stage fails, the blocking reason becomes `dcs`.
-3. CTCSS gate, if `--ctcss` is configured
+2. CTCSS gate, if `--ctcss` is configured
   * The chunk is checked for the required CTCSS tone.
   * Like DCS, it can remain open briefly using the same `--gate-hold` grace period.
   * If this stage fails, the blocking reason becomes `ctcss`.
+3. RMS silence gate
+  * The chunk RMS level is measured in dB.
+  * If it is below the configured silence threshold, the chunk is blocked.
+  * This stage runs after DCS/CTCSS and reports `silence` when those gates are already passing.
 
 The gate only passes audio when all active checks are true:
 
 ```text
-not silent AND dcs match AND ctcss match
+dcs match AND ctcss match AND not silent
 ```
 
 If a gate is not configured, that stage is treated as already open.
@@ -223,10 +223,10 @@ If a gate is not configured, that stage is treated as already open.
 When more than one condition could block audio, RadioPipe reports the first failing stage in this fixed order:
 
 ```text
-silence -> dcs -> ctcss
+dcs -> ctcss -> silence
 ```
 
-That means a silent chunk is reported as `silence` even if DCS or CTCSS would also fail.
+That means DCS is reported first, then CTCSS, and `silence` is only reported when tone/code gates pass but RMS is still below threshold.
 
 ### Clip close behavior
 

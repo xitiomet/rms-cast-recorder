@@ -54,6 +54,7 @@ public class StreamRecorder {
     private final Path baseDir;
     private final double silenceThresholdDb;
     private final double silenceDurationSeconds;
+    private final RmsGate rmsGate;
     private final float outputSampleRate;
     private final int outputChannels;
     private final int outputBitDepth;
@@ -182,6 +183,7 @@ public class StreamRecorder {
         this.baseDir = baseDir;
         this.silenceThresholdDb = silenceThresholdDb;
         this.silenceDurationSeconds = silenceDurationSeconds;
+        this.rmsGate = new RmsGate(silenceThresholdDb);
         this.outputSampleRate = outputSampleRate;
         this.outputChannels = outputChannels;
         this.outputBitDepth = outputBitDepth;
@@ -446,7 +448,6 @@ public class StreamRecorder {
         double statusOutputDb = -100.0; // RMS level after all gates
         boolean statusGateOpen = false;
         String statusGateReason = "silence";
-        String lastGateOpenReason = "silence";
         long statusGateSinceNanos = statusClockNanos;
         boolean statusAudioDetected = false;
         long statusAudioDetectedSinceNanos = statusClockNanos;
@@ -633,9 +634,6 @@ public class StreamRecorder {
                 continue;
             }
 
-            boolean isSilent = isSilent(currentBuffer, n, processingFormat);
-            double currentRmsDb = calculateRmsDb(currentBuffer, n, processingFormat);
-            statusRmsDb = currentRmsDb;  // track current RMS level
             long nowNanos = System.nanoTime();
 
             dcsStatusDetector.consume(currentBuffer, n, processingFormat);
@@ -707,23 +705,17 @@ public class StreamRecorder {
                 statusCtcssGateOpen = ctcssMatch;
                 statusCtcssGateSinceNanos = nowNanos;
             }
-            boolean rmsGateOpen = !isSilent;
+            RmsGate.Result rmsGateResult = this.rmsGate.evaluate(currentBuffer, n, processingFormat);
+            double currentRmsDb = rmsGateResult.getRmsDb();
+            boolean rmsGateOpen = rmsGateResult.isOpen();
+            statusRmsDb = currentRmsDb;
             if (statusRmsGateOpen != rmsGateOpen) {
                 statusRmsGateOpen = rmsGateOpen;
                 statusRmsGateSinceNanos = nowNanos;
             }
 
-            String currentGateBlockReason = determineGateBlockReason(isSilent, dcsMatch, ctcssMatch);
+            String currentGateBlockReason = determineGateBlockReason(dcsMatch, ctcssMatch, rmsGateOpen);
             boolean currentGateOpen = (currentGateBlockReason == null);
-            if (statusGateOpen != currentGateOpen) {
-                if (currentGateOpen) {
-                    String gateOpenReason = (statusGateReason == null) ? "none" : statusGateReason;
-                    publishEvent("gateOpen", "reason", gateOpenReason);
-                    lastGateOpenReason = gateOpenReason;
-                } else {
-                    publishEvent("gateClosed", "reason", lastGateOpenReason);
-                }
-            }
 
             if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
                 statusGateSinceNanos = nowNanos;
@@ -731,7 +723,7 @@ public class StreamRecorder {
             statusGateOpen = currentGateOpen;
             statusGateReason = currentGateBlockReason;
 
-            boolean gateAllowsAudio = !isSilent && dcsMatch && ctcssMatch;
+            boolean gateAllowsAudio = dcsMatch && ctcssMatch && rmsGateOpen;
             statusOutputDb = gateAllowsAudio ? currentRmsDb : -100.0;
             if (statusAudioDetected != gateAllowsAudio) {
                 statusAudioDetected = gateAllowsAudio;
@@ -1002,41 +994,6 @@ public class StreamRecorder {
                 format.getSampleSizeInBits(),
                 format.getEncoding(),
                 format.isBigEndian() ? "big" : "little");
-    }
-
-    private boolean isSilent(byte[] data, int len, AudioFormat format) {
-        return calculateRmsDb(data, len, format) < silenceThresholdDb;
-    }
-
-    private double calculateRmsDb(byte[] data, int len, AudioFormat format) {
-        int sampleSize = format.getSampleSizeInBits();
-        boolean bigEndian = format.isBigEndian();
-        int channels = format.getChannels();
-        if (sampleSize != 16) {
-            // we only converted to 16‑bit; other cases should not happen
-            return -100.0;  // return very low dB value for unsupported format
-        }
-        int frames = len / format.getFrameSize();
-        double sumSq = 0.0;
-        int offset = 0;
-        for (int i = 0; i < frames; i++) {
-            for (int ch = 0; ch < channels; ch++) {
-                int lo = data[offset] & 0xff;
-                int hi = data[offset + 1];
-                int sample;
-                if (bigEndian) {
-                    sample = (hi << 8) | lo;
-                } else {
-                    sample = (lo) | (hi << 8);
-                }
-                double norm = sample / 32768.0;
-                sumSq += norm * norm;
-                offset += 2;
-            }
-        }
-        double rms = Math.sqrt(sumSq / (frames * channels));
-        double db = 20 * Math.log10(rms + 1e-10); // avoid log(0)
-        return db;
     }
 
     private void writeChunk(byte[] audioData, AudioFormat sourceFormat, AudioFormat targetFormat, long startTimeMs) {
@@ -1369,15 +1326,15 @@ public class StreamRecorder {
         return String.format("%.1f", toneHz);
     }
 
-    private static String determineGateBlockReason(boolean isSilent, boolean dcsMatch, boolean ctcssMatch) {
-        if (isSilent) {
-            return "silence";
-        }
+    private static String determineGateBlockReason(boolean dcsMatch, boolean ctcssMatch, boolean rmsGateOpen) {
         if (!dcsMatch) {
             return "dcs";
         }
         if (!ctcssMatch) {
             return "ctcss";
+        }
+        if (!rmsGateOpen) {
+            return "silence";
         }
         return null;
     }

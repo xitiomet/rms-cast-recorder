@@ -6,4 +6,4 @@ Exec=/usr/bin/radio-pipe
 Icon=/usr/share/icons/radio-pipe/icon-64.png
 Terminal=true
 Type=Application
-Categories=Utility;Application;
+Categories=HamRadio;

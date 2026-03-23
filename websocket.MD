@@ -27,8 +27,6 @@ Common fields in every packet:
 - `dcsGone`: configured DCS gate closed
 - `ctcssDetected`: configured CTCSS gate opened
 - `ctcssGone`: configured CTCSS gate closed
-- `gateOpen`: overall audio gate opened
-- `gateClosed`: overall audio gate closed (or blocker changed)
 - `audioDetected`: gated audio clip started
 - `silenceDetected`: active clip ended due to silence
 - `savedRecording`: clip file written to disk (`filename` included)
@@ -72,30 +70,6 @@ Sent when a configured CTCSS gate opens.
 ```
 
 Sent when a configured CTCSS gate closes.
-
-### Gate closed
-
-```json
-{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401003,"reason":"dcs"}
-```
-
-Sent when audio flow becomes blocked, or when the blocking reason changes.
-
-Reason values:
-- `dcs`
-- `ctcss`
-- `silence`
-
-### Gate open
-
-```json
-{"event":"gateOpen","pid":12345,"apiPort":4040,"timestamp":1710938400003,"reason":"dcs"}
-```
-
-Sent when audio flow is no longer blocked.
-
-Field:
-- `reason`: the blocker that was just cleared (`dcs`, `ctcss`, or `silence`)
 
 ### Audio detected
 
@@ -177,7 +151,7 @@ Fields:
 - `rmsDb`: current RMS level in decibels (dB)
 - `outputDb`: RMS level after all gates. Equals `rmsDb` when audio passes all gates; otherwise `-100.0`
 - `gate`: overall gate state (open only if all gates open)
-- `gateReason`: blocker for overall gate (`dcs`, `ctcss`, `silence`, or `none` when open)
+- `gateReason`: blocker for overall gate (`dcs`, `ctcss`, `silence`, or `none` when open); precedence is `dcs -> ctcss -> silence`
 - `gateSeconds`: seconds since the overall gate entered its current state
 - `audioDetected`: `true` when current audio frames pass all gate conditions
 - `audioDetectedSeconds`: seconds since `audioDetected` last changed
@@ -189,18 +163,14 @@ Typical gated receive cycle (DCS gate configured):
 
 ```json
 {"event":"dcsDetected","pid":12345,"apiPort":4040,"timestamp":1710938400001,"dcs":"073","polarity":"normal"}
-{"event":"gateOpen","pid":12345,"apiPort":4040,"timestamp":1710938400003,"reason":"dcs"}
 {"event":"audioDetected","pid":12345,"apiPort":4040,"timestamp":1710938400004}
 {"event":"silenceDetected","pid":12345,"apiPort":4040,"timestamp":1710938401004}
 {"event":"savedRecording","pid":12345,"apiPort":4040,"timestamp":1710938401005,"filename":"/home/user/recordings/2026-03-20/2026-03-20_120000_dev0.wav"}
-{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401006,"reason":"silence"}
 {"event":"dcsGone","pid":12345,"apiPort":4040,"timestamp":1710938401007,"dcs":"073","polarity":"normal"}
-{"event":"gateClosed","pid":12345,"apiPort":4040,"timestamp":1710938401008,"reason":"dcs"}
 ```
 
 Notes:
-- `gateClosed` can occur multiple times in one receive cycle if the blocking reason changes.
-- `gateOpen` includes the previous blocker in `reason`.
+- Overall gate state and blocker are still available in `status` (`gate`, `gateReason`, and `gateSeconds`).
 
 ## Ungated Detection Examples
 
