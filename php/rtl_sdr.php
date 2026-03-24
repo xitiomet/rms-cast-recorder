@@ -3597,6 +3597,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 	}
 
 	$autoGainEnabled = parse_boolean_flag($input['autoGain'] ?? ($input['radioPipeAutoGain'] ?? '0'), false);
+	$voiceFilterEnabled = parse_boolean_flag($input['voiceFilter'] ?? ($input['radioPipeVoiceFilter'] ?? '0'), false);
 	$pipeOutputEnabled = parse_boolean_flag($input['pipeOutputEnabled'] ?? ($input['enablePipeOutput'] ?? '1'), false);
 	$pipeOutputs = normalize_pipe_output_entries($input['pipeOutputs'] ?? ($input['pipeOutputEntries'] ?? ($input['pipeOutput'] ?? array())));
 	$pipeOutputRawEnabled = parse_boolean_flag($input['pipeOutputRaw'] ?? 0, false);
@@ -3826,6 +3827,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'postGain' => $postGain,
 		'inputDejitter' => $inputDejitter,
 		'autoGain' => $autoGainEnabled ? 1 : 0,
+		'voiceFilter' => $voiceFilterEnabled ? 1 : 0,
 		'pipeOutputEnabled' => $pipeOutputEnabled ? 1 : 0,
 		'pipeOutputs' => $pipeOutputs,
 		'pipeOutputRaw' => $pipeOutputRawEnabled ? 1 : 0,
@@ -4189,6 +4191,10 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		$conditionerCommand[] = '--auto-gain';
 	}
 
+	if (parse_boolean_flag($config['voiceFilter'] ?? 0, false)) {
+		$conditionerCommand[] = '--voice-filter';
+	}
+
 	append_pipe_output_args($conditionerCommand, $config);
 
 	array_push(
@@ -4303,6 +4309,10 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 
 	if (parse_boolean_flag($config['autoGain'] ?? 0, false)) {
 		$recorderCommand[] = '--auto-gain';
+	}
+
+	if (parse_boolean_flag($config['voiceFilter'] ?? 0, false)) {
+		$recorderCommand[] = '--voice-filter';
 	}
 
 	append_pipe_output_args($recorderCommand, $config);
@@ -9022,6 +9032,7 @@ function sanitizeTemplateConfig(config)
 	clean.ctcss = normalizeClientCtcssTone(clean.ctcss);
 	clean.postGain = normalizeClientPostGainValue(clean.postGain);
 	clean.autoGain = parseClientBooleanFlag(clean.autoGain, false) ? '1' : '0';
+	clean.voiceFilter = parseClientBooleanFlag(clean.voiceFilter, false) ? '1' : '0';
 	clean.pipeOutputEnabled = parseClientBooleanFlag(clean.pipeOutputEnabled, false) ? '1' : '0';
 	clean.pipeOutputs = normalizeClientPipeOutputEntries(clean.pipeOutputs);
 	clean.pipeOutputPresetIds = normalizePipeOutputPresetIdList(clean.pipeOutputPresetIds);
@@ -9095,6 +9106,7 @@ function applyTemplateToDevice(deviceId, templateName, currentConfigOverride)
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.postGain = normalizeClientPostGainValue(merged.postGain);
 	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
+	merged.voiceFilter = parseClientBooleanFlag(merged.voiceFilter, false) ? '1' : '0';
 	merged.pipeOutputEnabled = parseClientBooleanFlag(merged.pipeOutputEnabled, false) ? '1' : '0';
 	merged.pipeOutputs = normalizeClientPipeOutputEntries(merged.pipeOutputs);
 	merged.pipeOutputPresetIds = normalizePipeOutputPresetIdList(merged.pipeOutputPresetIds);
@@ -9178,6 +9190,7 @@ function getDefaultConfig(deviceId)
 		threshold: '-40',
 		postGain: '',
 		autoGain: '0',
+		voiceFilter: '0',
 		pipeOutputEnabled: '1',
 		pipeOutputs: [],
 		pipeOutputPresetIds: [],
@@ -9758,6 +9771,7 @@ function buildPipelineStagePreviewLines(config)
 		effectiveInputDejitter = String(rmsInputDejitterMs);
 	}
 	var autoGainEnabled = parseClientBooleanFlag(source.autoGain, false);
+	var voiceFilterEnabled = parseClientBooleanFlag(source.voiceFilter, false);
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
 		var recorderBothLine = 'radio-pipe --stdin --stdin-rate ' + effectiveStdinRate;
 		if (effectiveInputDejitter !== '') {
@@ -9778,6 +9792,9 @@ function buildPipelineStagePreviewLines(config)
 		}
 		if (autoGainEnabled) {
 			recorderBothLine += ' --auto-gain';
+		}
+		if (voiceFilterEnabled) {
+			recorderBothLine += ' --voice-filter';
 		}
 		recorderBothLine = appendPipeOutputPreviewArgs(recorderBothLine, source);
 		lines.push(recorderBothLine);
@@ -9800,6 +9817,9 @@ function buildPipelineStagePreviewLines(config)
 		if (autoGainEnabled) {
 			conditionerLine += ' --auto-gain';
 		}
+		if (voiceFilterEnabled) {
+			conditionerLine += ' --voice-filter';
+		}
 		conditionerLine = appendPipeOutputPreviewArgs(conditionerLine, source);
 		lines.push(conditionerLine);
 	} else {
@@ -9820,6 +9840,9 @@ function buildPipelineStagePreviewLines(config)
 		}
 		if (autoGainEnabled) {
 			recorderLine += ' --auto-gain';
+		}
+		if (voiceFilterEnabled) {
+			recorderLine += ' --voice-filter';
 		}
 		recorderLine = appendPipeOutputPreviewArgs(recorderLine, source);
 		var afterRecordAction = String(source.afterRecordAction || 'none').toLowerCase();
@@ -11521,7 +11544,10 @@ function renderDeviceList()
 					'</div>' +
 					'<div class="form-row">' +
 						'<div><label>radio-pipe Gain (dB)</label><input type="text" class="field-post-gain" value="' + escapeHtml(String(config.postGain || '')) + '" placeholder="Optional: -60 to 60"></div>' +
-						'<div><label class="checkbox-label"><input type="checkbox" class="field-auto-gain"' + (parseClientBooleanFlag(config.autoGain, false) ? ' checked' : '') + '> Enable radio-pipe Auto Gain</label></div>' +
+						'<div>' +
+							'<label class="checkbox-label"><input type="checkbox" class="field-auto-gain"' + (parseClientBooleanFlag(config.autoGain, false) ? ' checked' : '') + '> Enable radio-pipe Auto Gain</label>' +
+							'<label class="checkbox-label"><input type="checkbox" class="field-voice-filter"' + (parseClientBooleanFlag(config.voiceFilter, false) ? ' checked' : '') + '> Enable radio-pipe Voice Filter</label>' +
+						'</div>' +
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>Pipe Outputs</label><div class="pipe-output-presets-list">' + buildPipeOutputPresetCheckboxesMarkup(config.pipeOutputPresetIds) + '</div></div>' +
@@ -11812,6 +11838,7 @@ function readCardConfig(card)
 		inputDejitter: card.querySelector('.field-input-dejitter') ? card.querySelector('.field-input-dejitter').value.trim() : '',
 		postGain: normalizeClientPostGainValue(card.querySelector('.field-post-gain').value),
 		autoGain: !!(card.querySelector('.field-auto-gain') && card.querySelector('.field-auto-gain').checked) ? '1' : '0',
+		voiceFilter: !!(card.querySelector('.field-voice-filter') && card.querySelector('.field-voice-filter').checked) ? '1' : '0',
 		pipeOutputEnabled: '1',
 		pipeOutputs: [],
 		pipeOutputPresetIds: selectedPipeOutputPresetIds,
@@ -12044,6 +12071,7 @@ function bindDeviceCard(card)
 	var postCommandArgInput = card.querySelector('.field-post-command-arg');
 	var postGainInput = card.querySelector('.field-post-gain');
 	var autoGainCheckbox = card.querySelector('.field-auto-gain');
+	var voiceFilterCheckbox = card.querySelector('.field-voice-filter');
 	var pipeOutputPresetsList = card.querySelector('.pipe-output-presets-list');
 	var newPipeOutputPresetButton = card.querySelector('.action-new-pipe-output-preset');
 	var storedConfig = getConfigForDevice(deviceId);
@@ -12058,6 +12086,9 @@ function bindDeviceCard(card)
 	}
 	if (autoGainCheckbox) {
 		autoGainCheckbox.checked = parseClientBooleanFlag(storedConfig.autoGain, false);
+	}
+	if (voiceFilterCheckbox) {
+		voiceFilterCheckbox.checked = parseClientBooleanFlag(storedConfig.voiceFilter, false);
 	}
 	if (pipeOutputPresetsList) {
 		pipeOutputPresetsList.innerHTML = buildPipeOutputPresetCheckboxesMarkup(selectedPresetIds);
