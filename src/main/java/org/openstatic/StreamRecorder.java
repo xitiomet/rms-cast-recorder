@@ -86,6 +86,8 @@ public class StreamRecorder {
     private final List<String> pipeOutputCommands;
     private volatile boolean pipeRawMode;
     private volatile AudioFormat pipeRawFormat;
+    private volatile boolean pipeRawPadMode;
+    private volatile long pipeRawPadDelayMillis;
     private volatile boolean pipeRawConversionWarned;
     private volatile boolean pipeConfigLogged;
     private volatile String pipeInputCommand;
@@ -231,6 +233,8 @@ public class StreamRecorder {
         this.pipeOutputCommands = new ArrayList<>();
         this.pipeRawMode = false;
         this.pipeRawFormat = null;
+        this.pipeRawPadMode = false;
+        this.pipeRawPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
         this.pipeRawConversionWarned = false;
         this.pipeConfigLogged = false;
         this.pipeInputCommand = null;
@@ -352,9 +356,18 @@ public class StreamRecorder {
     }
 
     public void setPipeRawOutput(boolean rawMode, AudioFormat rawFormat) {
+        setPipeRawOutput(rawMode, rawFormat, false, DEFAULT_STDOUT_PAD_DELAY_MILLIS);
+    }
+
+    public void setPipeRawOutput(boolean rawMode,
+                                 AudioFormat rawFormat,
+                                 boolean padMode,
+                                 long padDelayMillis) {
         if (!rawMode) {
             this.pipeRawMode = false;
             this.pipeRawFormat = null;
+            this.pipeRawPadMode = false;
+            this.pipeRawPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
             this.pipeRawConversionWarned = false;
             this.pipeConfigLogged = false;
             return;
@@ -364,6 +377,8 @@ public class StreamRecorder {
         }
         this.pipeRawMode = true;
         this.pipeRawFormat = rawFormat;
+        this.pipeRawPadMode = padMode;
+        this.pipeRawPadDelayMillis = Math.max(0L, padDelayMillis);
         this.pipeRawConversionWarned = false;
         this.pipeConfigLogged = false;
     }
@@ -686,6 +701,13 @@ public class StreamRecorder {
             deviceOutputSession = openDeviceOutputSession(processingFormat, clipOutputFormat);
         }
         List<PipeOutputSession> pipeSessions = openPipeOutputSessions();
+        ArrayDeque<byte[]> pipePadBuffer = new ArrayDeque<>();
+        if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
+            long targetBytes = Math.round(this.pipeRawPadDelayMillis / 1000.0 * frameRate) * frameSize;
+            if (targetBytes > 0) {
+                pipePadBuffer.addLast(new byte[(int) targetBytes]);
+            }
+        }
 
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
@@ -766,11 +788,19 @@ public class StreamRecorder {
                 if (inputEndOfStream) {
                     break;
                 }
-                if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
+                boolean useStallPadding = (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode)
+                        || (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode);
+                if (useStallPadding) {
                     int padBytes = padFramesPerTick * frameSize;
                     byte[] padSilence = new byte[padBytes];
-                    stdoutPadBuffer.addLast(padSilence);
-                    drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
+                    if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
+                        stdoutPadBuffer.addLast(padSilence);
+                        drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
+                    }
+                    if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
+                        pipePadBuffer.addLast(padSilence);
+                        drainPipePadBuffer(pipePadBuffer, padBytes, processingFormat, pipeSessions);
+                    }
 
                     if (activelyRecording) {
                         chunk.write(padSilence, 0, padBytes);
@@ -1006,8 +1036,16 @@ public class StreamRecorder {
                     writeStdoutRaw(currentBuffer, n, processingFormat);
                 }
             }
-            if (!pipeSessions.isEmpty() && this.pipeRawMode && includeFrameInClip) {
-                writePipeRaw(pipeSessions, currentBuffer, n, processingFormat);
+            if (!pipeSessions.isEmpty() && this.pipeRawMode) {
+                if (this.pipeRawPadMode) {
+                    byte[] pipeFrame = includeFrameInClip
+                            ? Arrays.copyOf(currentBuffer, n)
+                            : new byte[n];
+                    pipePadBuffer.addLast(pipeFrame);
+                    drainPipePadBuffer(pipePadBuffer, n, processingFormat, pipeSessions);
+                } else if (includeFrameInClip) {
+                    writePipeRaw(pipeSessions, currentBuffer, n, processingFormat);
+                }
             }
             if (deviceOutputSession != null && includeFrameInClip) {
                 writeDeviceOutput(deviceOutputSession, currentBuffer, n, processingFormat);
@@ -1168,6 +1206,11 @@ public class StreamRecorder {
             AudioFormat targetFormat = (this.pipeRawFormat == null) ? activeFormat : this.pipeRawFormat;
             log("PIPE", ANSI_CYAN,
                 "pipe mode: raw PCM stream: " + describeAudioFormat(targetFormat));
+            if (this.pipeRawPadMode) {
+                log("PIPE", ANSI_CYAN,
+                        "pipe pad enabled: " + this.pipeRawPadDelayMillis
+                                + " ms delay buffer, continuous silence on stall.");
+            }
         } else {
             log("PIPE", ANSI_CYAN,
                     "pipe mode: WAV clip stream (one WAV payload per closed clip).");
@@ -1252,6 +1295,24 @@ public class StreamRecorder {
                 remaining -= head.length;
             } else {
                 writeStdoutRaw(head, remaining, format);
+                buffer.addFirst(Arrays.copyOfRange(head, remaining, head.length));
+                remaining = 0;
+            }
+        }
+    }
+
+    private void drainPipePadBuffer(ArrayDeque<byte[]> buffer,
+                                    int bytes,
+                                    AudioFormat format,
+                                    List<PipeOutputSession> sessions) {
+        int remaining = bytes;
+        while (remaining > 0 && !buffer.isEmpty()) {
+            byte[] head = buffer.removeFirst();
+            if (head.length <= remaining) {
+                writePipeRaw(sessions, head, head.length, format);
+                remaining -= head.length;
+            } else {
+                writePipeRaw(sessions, head, remaining, format);
                 buffer.addFirst(Arrays.copyOfRange(head, remaining, head.length));
                 remaining = 0;
             }
