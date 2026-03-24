@@ -154,7 +154,7 @@ raw PCM stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
   | ./radio-pipe --stdin --stdin-raw \
-    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --sample-rate 8000 --channels 1 --bitrate 16 \
     -o ./recordings
 ```
 
@@ -172,10 +172,9 @@ raw PCM stdout example (gate audio for another program):
 ```bash
 $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | ./radio-pipe --stdin --stdin-raw \
-    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --sample-rate 8000 --channels 1 --bitrate 16 \
     --dcs 023 \
     --stdout --stdout-raw --stdout-pad \
-    --stdout-rate 8000 --stdout-channels 1 --stdout-bits 16 \
   | your-program-that-reads-raw-pcm
 ```
 
@@ -183,11 +182,10 @@ raw PCM stdout example with post-gate gain:
 ```bash
 $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | ./radio-pipe --stdin --stdin-raw \
-    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --sample-rate 8000 --channels 1 --bitrate 16 \
     --dcs 023 \
     --gain 6 --auto-gain \
     --stdout --stdout-raw --stdout-pad \
-    --stdout-rate 8000 --stdout-channels 1 --stdout-bits 16 \
   | your-program-that-reads-raw-pcm
 ```
 
@@ -197,8 +195,18 @@ $ ./radio-pipe --devs
 
 $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | ./radio-pipe --stdin --stdin-raw \
-    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --sample-rate 8000 --channels 1 --bitrate 16 \
     --dcs 023 --dev 0 -o ./recordings
+```
+
+shared defaults with recording-specific override:
+```bash
+$ arecord -f S16_LE -c 1 -r 8000 -t raw - \
+  | ./radio-pipe --stdin --stdin-raw \
+    --sample-rate 8000 --channels 1 --bitrate 16 \
+    --recording-sample-rate 16000 \
+    --recording-endian little \
+    --stdout --stdout-raw --stdout-endian big
 ```
 
 `--dev` accepts either a device index from `--devs` (example: `--dev 0`) or a case-insensitive name/description substring (example: `--dev USB`).
@@ -233,7 +241,7 @@ $ ./radio-pipe -u http://example.com:8000/stream.mp3 \
   --pipe-output-bits 16
 ```
 
-`--pipe-output` is always WAV clip output. Use `--pipe-output-raw` to send raw PCM stream to the same pipe commands. Raw format flags are `--pipe-output-rate`, `--pipe-output-channels`, `--pipe-output-bits`, `--pipe-output-big-endian`, and `--pipe-output-unsigned`. Use `--pipe-output-pad` to emit silence while input stalls (with optional `--pipe-output-pad-delay` buffer, default 500 ms).
+`--pipe-output` is always WAV clip output. Use `--pipe-output-raw` to send raw PCM stream to the same pipe commands. Raw format flags are `--pipe-output-rate`, `--pipe-output-channels`, `--pipe-output-bits`, `--pipe-output-endian`, and `--pipe-output-unsigned`. Use `--pipe-output-pad` to emit silence while input stalls (with optional `--pipe-output-pad-delay` buffer, default 500 ms).
 
 Note: Combining higher fixed `--gain` values with `--auto-gain` can increase clipping on loud signals; reduce `--gain` if output sounds distorted.
 
@@ -257,9 +265,9 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
 1. Input arrives from one of these sources:
   * `--url`: Shoutcast/Icecast stream
   * `--stdin`: containerized audio from stdin
-  * `--stdin --stdin-raw`: raw PCM from stdin using the `--stdin-rate`, `--stdin-channels`, and `--stdin-bits` settings
+  * `--stdin --stdin-raw`: raw PCM from stdin using the `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, and optional `--stdin-endian` settings
   * `--pipe-input`: containerized audio from a launched command's stdout
-  * `--pipe-input --pipe-input-raw`: raw PCM from a launched command's stdout using `--pipe-input-rate`, `--pipe-input-channels`, and `--pipe-input-bits`
+  * `--pipe-input --pipe-input-raw`: raw PCM from a launched command's stdout using `--pipe-input-rate`, `--pipe-input-channels`, `--pipe-input-bits`, and optional `--pipe-input-endian`
 2. The input is decoded into signed 16-bit PCM for analysis.
 3. An input de-jitter buffer smooths short read stalls before the gate logic runs.
 4. Audio is processed in small chunks and evaluated by the gate stages described below.
@@ -426,7 +434,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 ### Option groups (quick map)
 
 * **Input source**: `--url` or `--stdin` (exactly one is required)
-* **Raw stdin format**: `--stdin-raw`, `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, `--stdin-big-endian`, `--stdin-unsigned`, `--input-dejitter`
+* **Raw stdin format**: `--stdin-raw`, `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, `--stdin-endian`, `--stdin-unsigned`, `--input-dejitter`
 * **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
@@ -440,7 +448,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --stdin-rate <HZ> – raw stdin sample rate (default matches --sample-rate)
 * --stdin-channels <N> – raw stdin channels (default matches --channels)
 * --stdin-bits <BITS> – raw stdin bit depth (default matches --bitrate)
-* --stdin-big-endian – raw stdin byte order is big-endian (default little-endian)
+* --stdin-endian <ORDER> – raw stdin byte order: `little` or `big` (default matches --endian)
 * --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
 * --input-dejitter <MS> – input de-jitter buffer depth for bursty piped input (default `250`)
 * --stdout – write gated clips to stdout as WAV clip stream
@@ -450,15 +458,20 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --stdout-rate <HZ> – raw stdout sample rate (default matches --sample-rate)
 * --stdout-channels <N> – raw stdout channels (default matches --channels)
 * --stdout-bits <BITS> – raw stdout bit depth (default matches --bitrate)
-* --stdout-big-endian – raw stdout byte order is big-endian (default little-endian)
+* --stdout-endian <ORDER> – raw stdout byte order: `little` or `big` (default matches --endian)
 * --stdout-unsigned – raw stdout encoding is unsigned PCM (default signed PCM)
 * -o,--out [DIR] – base directory for recordings (default `$RADIOPIPE_RECORDINGS` or `./recordings`; if `--stdout` is used without `-o`, file recording is disabled)
 * -t,--threshold <DB> – silence threshold in dB (default -50)
 * -s,--silence <SECONDS> – how long the signal must stay below threshold to
   end a clip (default 2)
-* -r,--sample-rate <HZ> – output sample rate in Hz (default 8000)
-* -c,--channels <N> – output channels (1 mono, 2 stereo; default 1)
-* -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
+* -r,--sample-rate <HZ> – default sample rate in Hz for recording and raw I/O formats (default 8000)
+* -c,--channels <N> – default channel count for recording and raw I/O formats (1 mono, 2 stereo; default 1)
+* -b,--bitrate <BITS> – default PCM bit depth in bits for recording and raw I/O formats (default 16)
+* --endian <ORDER> – default byte order for recording and raw I/O formats: `little` or `big` (default `little`)
+* --recording-sample-rate <HZ> – recording output sample rate in Hz (default matches --sample-rate)
+* --recording-channels <N> – recording output channels (1 mono, 2 stereo; default matches --channels)
+* --recording-bitrate <BITS> – recording output PCM bit depth in bits (default matches --bitrate)
+* --recording-endian <ORDER> – recording output byte order: `little` or `big` (default matches --endian)
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
@@ -474,19 +487,23 @@ Exactly one input source is required: `--url` or `--stdin`.
 
 When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
-Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endian, --stdin-unsigned) require --stdin-raw.
+Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-endian, --stdin-unsigned) require --stdin-raw.
+
+`--stdin-endian`, `--stdout-endian`, `--pipe-input-endian`, and `--pipe-output-endian` allow explicit little-endian or big-endian selection per raw mode.
+
+`--endian` sets the shared default byte order used by recording, raw stdin, raw pipe input, raw stdout, and raw pipe output unless a mode-specific override is provided.
 
 `--input-dejitter` adds an input-side jitter buffer so short producer timing gaps (for example, some RTL-SDR pipe bursts) do not immediately create choppy downstream output.
 
-Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdout-big-endian, --stdout-unsigned) require --stdout-raw.
+Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdout-endian, --stdout-unsigned) require --stdout-raw.
 
 `--stdout-pad` requires raw stdout output (`--stdout-raw`) and emits a continuous gapless stream by maintaining a fixed-depth delay buffer (default 500 ms) pre-filled with silence.
 
 `--stdout-pad-delay` sets the delay buffer depth in ms; the output stream is always delayed by this amount but never interrupted, even at startup or during input stalls.
 
-When using --dcs, output PCM bit depth must be 16 (`--bitrate 16`).
+When using --dcs, output PCM bit depth must be 16 (`--bitrate 16` or `--recording-bitrate 16`).
 
-When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16`).
+When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16` or `--recording-bitrate 16`).
 
 When using both --dcs and --ctcss, both gates must match for clips to open.
 

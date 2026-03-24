@@ -40,8 +40,8 @@ public class RadioPipeMain
             .desc("Raw pipe input channel count (default matches --channels)").build());
         options.addOption(Option.builder().longOpt("pipe-input-bits").hasArg().argName("BITS")
             .desc("Raw pipe input bit depth (default matches --bitrate)").build());
-        options.addOption(Option.builder().longOpt("pipe-input-big-endian")
-            .desc("Raw pipe input byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-endian").hasArg().argName("ORDER")
+            .desc("Raw pipe input byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder().longOpt("pipe-input-unsigned")
             .desc("Raw pipe input samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder().longOpt("stdin-raw")
@@ -52,8 +52,8 @@ public class RadioPipeMain
             .desc("Raw stdin channel count (default matches --channels)").build());
         options.addOption(Option.builder().longOpt("stdin-bits").hasArg().argName("BITS")
             .desc("Raw stdin bit depth (default matches --bitrate)").build());
-        options.addOption(Option.builder().longOpt("stdin-big-endian")
-            .desc("Raw stdin byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("stdin-endian").hasArg().argName("ORDER")
+            .desc("Raw stdin byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder().longOpt("stdin-unsigned")
             .desc("Raw stdin samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder().longOpt("input-dejitter").hasArg().argName("MS")
@@ -74,8 +74,8 @@ public class RadioPipeMain
             .desc("Raw pipe output channel count (default matches --channels)").build());
         options.addOption(Option.builder().longOpt("pipe-output-bits").hasArg().argName("BITS")
             .desc("Raw pipe output bit depth (default matches --bitrate)").build());
-        options.addOption(Option.builder().longOpt("pipe-output-big-endian")
-            .desc("Raw pipe output byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-endian").hasArg().argName("ORDER")
+            .desc("Raw pipe output byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder().longOpt("pipe-output-unsigned")
             .desc("Raw pipe output samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder().longOpt("pipe-output-pad")
@@ -94,23 +94,33 @@ public class RadioPipeMain
             .desc("Raw stdout channel count (default matches --channels)").build());
         options.addOption(Option.builder().longOpt("stdout-bits").hasArg().argName("BITS")
             .desc("Raw stdout bit depth (default matches --bitrate)").build());
-        options.addOption(Option.builder().longOpt("stdout-big-endian")
-            .desc("Raw stdout byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("stdout-endian").hasArg().argName("ORDER")
+            .desc("Raw stdout byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder().longOpt("stdout-unsigned")
             .desc("Raw stdout samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder("o").longOpt("out").hasArg().argName("DIR")
             .optionalArg(true)
-            .desc("Base directory where recordings will be stored (default=$RADIOPIPE_RECORDINGS or ./recordings)").build());
+            .desc("Enable Recording, and optionally specify base directory where recordings will be stored (default=$RADIOPIPE_RECORDINGS or ./recordings)").build());
         options.addOption(Option.builder("t").longOpt("threshold").hasArg().argName("DB")
                 .desc("Silence threshold in dB (default -50)").build());
         options.addOption(Option.builder("s").longOpt("silence").hasArg().argName("SECONDS")
                 .desc("Duration of silence before closing a clip (default 2s)").build());
         options.addOption(Option.builder("r").longOpt("sample-rate").hasArg().argName("HZ")
-            .desc("Output sample rate in Hz (default 8000)").build());
+            .desc("Default sample rate in Hz for recording and raw I/O formats (default 8000)").build());
         options.addOption(Option.builder("c").longOpt("channels").hasArg().argName("N")
-            .desc("Output channels (1=mono, 2=stereo) (default 1)").build());
+            .desc("Default channel count for recording and raw I/O formats (1=mono, 2=stereo) (default 1)").build());
         options.addOption(Option.builder("b").longOpt("bitrate").hasArg().argName("BITS")
-            .desc("Output PCM bit depth in bits (default 16)").build());
+            .desc("Default PCM bit depth for recording and raw I/O formats in bits (default 16)").build());
+        options.addOption(Option.builder().longOpt("endian").hasArg().argName("ORDER")
+            .desc("Default byte order for recording and raw I/O formats: little or big (default little)").build());
+        options.addOption(Option.builder().longOpt("recording-sample-rate").hasArg().argName("HZ")
+            .desc("Recording output sample rate in Hz (default matches --sample-rate)").build());
+        options.addOption(Option.builder().longOpt("recording-channels").hasArg().argName("N")
+            .desc("Recording output channels (1=mono, 2=stereo) (default matches --channels)").build());
+        options.addOption(Option.builder().longOpt("recording-bitrate").hasArg().argName("BITS")
+            .desc("Recording output PCM bit depth in bits (default matches --bitrate)").build());
+        options.addOption(Option.builder().longOpt("recording-endian").hasArg().argName("ORDER")
+            .desc("Recording output byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder("x").longOpt("on-write").hasArg().argName("PROGRAM")
             .desc("Optional hook command run after each WAV write; use {wav} placeholder or WAV is arg1 by default").build());
         options.addOption(Option.builder("n").longOpt("name").hasArg().argName("STREAM")
@@ -150,12 +160,12 @@ public class RadioPipeMain
             boolean hasRawFormatFlags = cmd.hasOption("stdin-rate")
                     || cmd.hasOption("stdin-channels")
                     || cmd.hasOption("stdin-bits")
-                    || cmd.hasOption("stdin-big-endian")
+                    || cmd.hasOption("stdin-endian")
                     || cmd.hasOption("stdin-unsigned");
                 boolean hasPipeInputRawFormatFlags = cmd.hasOption("pipe-input-rate")
                     || cmd.hasOption("pipe-input-channels")
                     || cmd.hasOption("pipe-input-bits")
-                    || cmd.hasOption("pipe-input-big-endian")
+                    || cmd.hasOption("pipe-input-endian")
                     || cmd.hasOption("pipe-input-unsigned");
             boolean useStdout = cmd.hasOption("stdout");
             String outputDeviceSelector = cmd.getOptionValue("dev");
@@ -170,12 +180,12 @@ public class RadioPipeMain
                 boolean hasPipeRawFormatFlags = cmd.hasOption("pipe-output-rate")
                     || cmd.hasOption("pipe-output-channels")
                     || cmd.hasOption("pipe-output-bits")
-                    || cmd.hasOption("pipe-output-big-endian")
+                    || cmd.hasOption("pipe-output-endian")
                     || cmd.hasOption("pipe-output-unsigned");
             boolean hasStdoutRawFormatFlags = cmd.hasOption("stdout-rate")
                     || cmd.hasOption("stdout-channels")
                     || cmd.hasOption("stdout-bits")
-                    || cmd.hasOption("stdout-big-endian")
+                    || cmd.hasOption("stdout-endian")
                     || cmd.hasOption("stdout-unsigned");
             if (hasRawFormatFlags || stdinRaw)
             {
@@ -255,9 +265,15 @@ public class RadioPipeMain
             logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, usePipeOutput, hasOutDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
-            float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
-            int outputChannels = Integer.parseInt(cmd.getOptionValue("c", "1"));
-            int outputBitDepth = Integer.parseInt(cmd.getOptionValue("b", "16"));
+            float defaultSampleRate = Float.parseFloat(cmd.getOptionValue("sample-rate", "8000"));
+            int defaultChannels = Integer.parseInt(cmd.getOptionValue("channels", "1"));
+            int defaultBitDepth = Integer.parseInt(cmd.getOptionValue("bitrate", "16"));
+            boolean defaultBigEndian = parseEndianOption("endian", cmd.getOptionValue("endian", "little"));
+            float outputSampleRate = Float.parseFloat(cmd.getOptionValue("recording-sample-rate", String.valueOf(defaultSampleRate)));
+            int outputChannels = Integer.parseInt(cmd.getOptionValue("recording-channels", String.valueOf(defaultChannels)));
+            int outputBitDepth = Integer.parseInt(cmd.getOptionValue("recording-bitrate", String.valueOf(defaultBitDepth)));
+                boolean outputBigEndian = parseEndianOption("recording-endian",
+                    cmd.getOptionValue("recording-endian", defaultBigEndian ? "big" : "little"));
             String onWriteProgram = cmd.getOptionValue("x");
             String streamNameOverride = cmd.getOptionValue("n");
             Integer dcsCode = cmd.hasOption("dcs") ? parseDcsCode(cmd.getOptionValue("dcs")) : null;
@@ -286,20 +302,30 @@ public class RadioPipeMain
             AudioFormat stdoutRawFormat = null;
             AudioFormat pipeOutputRawFormat = null;
 
-            if (outputSampleRate <= 0) {
+            if (defaultSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
             }
-            if (outputChannels <= 0) {
+            if (defaultChannels <= 0) {
                 throw new ParseException("channels must be > 0");
             }
-            if (outputBitDepth <= 0 || outputBitDepth % 8 != 0) {
+            if (defaultBitDepth <= 0 || defaultBitDepth % 8 != 0) {
                 throw new ParseException("bitrate must be a positive multiple of 8 (for PCM bit depth)");
             }
+
+            if (outputSampleRate <= 0) {
+                throw new ParseException("recording-sample-rate must be > 0");
+            }
+            if (outputChannels <= 0) {
+                throw new ParseException("recording-channels must be > 0");
+            }
+            if (outputBitDepth <= 0 || outputBitDepth % 8 != 0) {
+                throw new ParseException("recording-bitrate must be a positive multiple of 8 (for PCM bit depth)");
+            }
             if (dcsCode != null && outputBitDepth != 16) {
-                throw new ParseException("--dcs requires 16-bit output PCM (use --bitrate 16)");
+                throw new ParseException("--dcs requires 16-bit output PCM (use --bitrate 16 or --recording-bitrate 16)");
             }
             if (ctcssToneHz != null && outputBitDepth != 16) {
-                throw new ParseException("--ctcss requires 16-bit output PCM (use --bitrate 16)");
+                throw new ParseException("--ctcss requires 16-bit output PCM (use --bitrate 16 or --recording-bitrate 16)");
             }
             if (inputDejitterMs < 0) {
                 throw new ParseException("input-dejitter must be >= 0 milliseconds");
@@ -334,10 +360,10 @@ public class RadioPipeMain
             }
 
             if (stdoutRaw) {
-                float stdoutSampleRate = Float.parseFloat(cmd.getOptionValue("stdout-rate", String.valueOf(outputSampleRate)));
-                int stdoutChannels = Integer.parseInt(cmd.getOptionValue("stdout-channels", String.valueOf(outputChannels)));
-                int stdoutBitDepth = Integer.parseInt(cmd.getOptionValue("stdout-bits", String.valueOf(outputBitDepth)));
-                boolean stdoutBigEndian = cmd.hasOption("stdout-big-endian");
+                float stdoutSampleRate = Float.parseFloat(cmd.getOptionValue("stdout-rate", String.valueOf(defaultSampleRate)));
+                int stdoutChannels = Integer.parseInt(cmd.getOptionValue("stdout-channels", String.valueOf(defaultChannels)));
+                int stdoutBitDepth = Integer.parseInt(cmd.getOptionValue("stdout-bits", String.valueOf(defaultBitDepth)));
+                boolean stdoutBigEndian = resolveEndianOption(cmd, "stdout-endian", defaultBigEndian);
                 boolean stdoutUnsigned = cmd.hasOption("stdout-unsigned");
 
                 if (stdoutSampleRate <= 0) {
@@ -364,10 +390,10 @@ public class RadioPipeMain
             }
 
             if (pipeOutputRaw) {
-                float pipeSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-output-rate", String.valueOf(outputSampleRate)));
-                int pipeChannels = Integer.parseInt(cmd.getOptionValue("pipe-output-channels", String.valueOf(outputChannels)));
-                int pipeBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-output-bits", String.valueOf(outputBitDepth)));
-                boolean pipeBigEndian = cmd.hasOption("pipe-output-big-endian");
+                float pipeSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-output-rate", String.valueOf(defaultSampleRate)));
+                int pipeChannels = Integer.parseInt(cmd.getOptionValue("pipe-output-channels", String.valueOf(defaultChannels)));
+                int pipeBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-output-bits", String.valueOf(defaultBitDepth)));
+                boolean pipeBigEndian = resolveEndianOption(cmd, "pipe-output-endian", defaultBigEndian);
                 boolean pipeUnsigned = cmd.hasOption("pipe-output-unsigned");
 
                 if (pipeSampleRate <= 0) {
@@ -394,10 +420,10 @@ public class RadioPipeMain
             }
 
             if (pipeInputRaw) {
-                float pipeInputSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-input-rate", String.valueOf(outputSampleRate)));
-                int pipeInputChannels = Integer.parseInt(cmd.getOptionValue("pipe-input-channels", String.valueOf(outputChannels)));
-                int pipeInputBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-input-bits", String.valueOf(outputBitDepth)));
-                boolean pipeInputBigEndian = cmd.hasOption("pipe-input-big-endian");
+                float pipeInputSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-input-rate", String.valueOf(defaultSampleRate)));
+                int pipeInputChannels = Integer.parseInt(cmd.getOptionValue("pipe-input-channels", String.valueOf(defaultChannels)));
+                int pipeInputBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-input-bits", String.valueOf(defaultBitDepth)));
+                boolean pipeInputBigEndian = resolveEndianOption(cmd, "pipe-input-endian", defaultBigEndian);
                 boolean pipeInputUnsigned = cmd.hasOption("pipe-input-unsigned");
 
                 if (pipeInputSampleRate <= 0) {
@@ -426,10 +452,10 @@ public class RadioPipeMain
             StreamRecorder recorder;
             if (useStdin || usePipeInput) {
                 if (stdinRaw) {
-                    float stdinSampleRate = Float.parseFloat(cmd.getOptionValue("stdin-rate", String.valueOf(outputSampleRate)));
-                    int stdinChannels = Integer.parseInt(cmd.getOptionValue("stdin-channels", String.valueOf(outputChannels)));
-                    int stdinBitDepth = Integer.parseInt(cmd.getOptionValue("stdin-bits", String.valueOf(outputBitDepth)));
-                    boolean stdinBigEndian = cmd.hasOption("stdin-big-endian");
+                    float stdinSampleRate = Float.parseFloat(cmd.getOptionValue("stdin-rate", String.valueOf(defaultSampleRate)));
+                    int stdinChannels = Integer.parseInt(cmd.getOptionValue("stdin-channels", String.valueOf(defaultChannels)));
+                    int stdinBitDepth = Integer.parseInt(cmd.getOptionValue("stdin-bits", String.valueOf(defaultBitDepth)));
+                    boolean stdinBigEndian = resolveEndianOption(cmd, "stdin-endian", defaultBigEndian);
                     boolean stdinUnsigned = cmd.hasOption("stdin-unsigned");
 
                     if (stdinSampleRate <= 0) {
@@ -463,6 +489,7 @@ public class RadioPipeMain
                             outputSampleRate,
                             outputChannels,
                             outputBitDepth,
+                            outputBigEndian,
                             onWriteProgram,
                             streamNameOverride);
                 } else {
@@ -474,6 +501,7 @@ public class RadioPipeMain
                             outputSampleRate,
                             outputChannels,
                             outputBitDepth,
+                            outputBigEndian,
                             onWriteProgram,
                             streamNameOverride);
                 }
@@ -486,6 +514,7 @@ public class RadioPipeMain
                         outputSampleRate,
                         outputChannels,
                         outputBitDepth,
+                        outputBigEndian,
                         onWriteProgram,
                         streamNameOverride);
             }
@@ -631,6 +660,39 @@ public class RadioPipeMain
         }
 
         return parsed;
+    }
+
+    private static boolean parseEndianOption(String optionName, String value) throws ParseException
+    {
+        if (value == null) {
+            throw new ParseException(optionName + " must be little or big");
+        }
+
+        String normalized = value.trim().toLowerCase();
+        if (normalized.isEmpty()) {
+            throw new ParseException(optionName + " must be little or big");
+        }
+
+        if ("little".equals(normalized) || "le".equals(normalized)) {
+            return false;
+        }
+        if ("big".equals(normalized) || "be".equals(normalized)) {
+            return true;
+        }
+
+        throw new ParseException(optionName + " must be little or big");
+    }
+
+    private static boolean resolveEndianOption(CommandLine cmd,
+                                               String optionName,
+                                               boolean defaultBigEndian) throws ParseException
+    {
+        String explicitValue = cmd.getOptionValue(optionName);
+        if (explicitValue == null) {
+            return defaultBigEndian;
+        }
+
+        return parseEndianOption(optionName, explicitValue);
     }
 
     private static ResolvedRecordingsDirectory resolveRecordingsDirectory(String requestedOutDir)

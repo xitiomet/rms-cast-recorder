@@ -49,6 +49,8 @@ public class StreamRecorder {
     private static final long PIPE_RESTART_BACKOFF_MILLIS = 10000L;
     private static final double AUTO_GAIN_TARGET_DB = -12.0;
     private static final double AUTO_GAIN_MAX_DB = 30.0;
+    private static final double AUTO_GAIN_ATTACK_DB_PER_SEC = 15.0;
+    private static final double AUTO_GAIN_RELEASE_DB_PER_SEC = 25.0;
     private final URL streamUrl;
     private final InputStream stdinInput;
     private final boolean stdinMode;
@@ -61,6 +63,7 @@ public class StreamRecorder {
     private final float outputSampleRate;
     private final int outputChannels;
     private final int outputBitDepth;
+    private final boolean outputBigEndian;
     private final List<String> onWriteCommand;
     private final String streamNameOverride;
     private volatile boolean running = true;
@@ -96,6 +99,7 @@ public class StreamRecorder {
     private volatile Process pipeInputProcess;
     private volatile double outputGainDb;
     private volatile boolean autoGainEnabled;
+    private volatile double smoothedAutoGainDb;
     private volatile ApiWebSocketServer apiWebSocketServer;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
@@ -108,9 +112,10 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram) {
         this(streamUrl, baseDir, silenceThresholdDb, silenceDurationSeconds, outputSampleRate,
-                outputChannels, outputBitDepth, onWriteProgram, null);
+            outputChannels, outputBitDepth, outputBigEndian, onWriteProgram, null);
     }
 
     public StreamRecorder(URL streamUrl,
@@ -120,10 +125,11 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram,
                           String streamNameOverride) {
         this(streamUrl, null, false, false, null, streamUrl.getPath(), baseDir, silenceThresholdDb,
-                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+            silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth, outputBigEndian,
                 onWriteProgram, streamNameOverride);
     }
 
@@ -134,9 +140,10 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram) {
         this(stdinInput, baseDir, silenceThresholdDb, silenceDurationSeconds, outputSampleRate,
-                outputChannels, outputBitDepth, onWriteProgram, null);
+            outputChannels, outputBitDepth, outputBigEndian, onWriteProgram, null);
     }
 
     public StreamRecorder(InputStream stdinInput,
@@ -146,10 +153,11 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram,
                           String streamNameOverride) {
         this(null, stdinInput, true, false, null, "stdin", baseDir, silenceThresholdDb,
-                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+            silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth, outputBigEndian,
                 onWriteProgram, streamNameOverride);
     }
 
@@ -161,9 +169,10 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram) {
         this(stdinInput, stdinRawFormat, baseDir, silenceThresholdDb, silenceDurationSeconds,
-                outputSampleRate, outputChannels, outputBitDepth, onWriteProgram, null);
+            outputSampleRate, outputChannels, outputBitDepth, outputBigEndian, onWriteProgram, null);
     }
 
     public StreamRecorder(InputStream stdinInput,
@@ -174,10 +183,11 @@ public class StreamRecorder {
                           float outputSampleRate,
                           int outputChannels,
                           int outputBitDepth,
+                  boolean outputBigEndian,
                           String onWriteProgram,
                           String streamNameOverride) {
         this(null, stdinInput, true, true, stdinRawFormat, "stdin", baseDir, silenceThresholdDb,
-                silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth,
+            silenceDurationSeconds, outputSampleRate, outputChannels, outputBitDepth, outputBigEndian,
                 onWriteProgram, streamNameOverride);
     }
 
@@ -193,6 +203,7 @@ public class StreamRecorder {
                            float outputSampleRate,
                            int outputChannels,
                            int outputBitDepth,
+                           boolean outputBigEndian,
                            String onWriteProgram,
                            String streamNameOverride) {
         this.streamUrl = streamUrl;
@@ -207,6 +218,7 @@ public class StreamRecorder {
         this.outputSampleRate = outputSampleRate;
         this.outputChannels = outputChannels;
         this.outputBitDepth = outputBitDepth;
+        this.outputBigEndian = outputBigEndian;
         this.onWriteCommand = parseCommandLine(onWriteProgram);
         this.streamNameOverride = isBlank(streamNameOverride) ? null : streamNameOverride.trim();
         this.streamTitle = normalizeStreamTitle((this.streamNameOverride != null)
@@ -243,6 +255,7 @@ public class StreamRecorder {
         this.pipeInputProcess = null;
         this.outputGainDb = 0.0;
         this.autoGainEnabled = false;
+        this.smoothedAutoGainDb = 0.0;
         this.apiWebSocketServer = null;
     }
 
@@ -408,6 +421,7 @@ public class StreamRecorder {
         }
         this.outputGainDb = gainDb;
         this.autoGainEnabled = autoGainEnabled;
+        this.smoothedAutoGainDb = 0.0;
     }
 
     private boolean canWriteRecordings() {
@@ -596,7 +610,7 @@ public class StreamRecorder {
                 outputChannels,
                 outputChannels * (outputBitDepth / 8),
                 outputSampleRate,
-                false);
+            outputBigEndian);
 
         try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
             boolean outputConversionSupported = AudioSystem.isConversionSupported(outputFormat, decodedFormat);
@@ -607,13 +621,14 @@ public class StreamRecorder {
             AudioFormat activeOutputFormat = outputConversionSupported ? outputFormat : decodedFormat;
             log("READY", ANSI_GREEN,
                     String.format(
-                            "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; clip output %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                        "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; clip output %.0f Hz, %d channel(s), %d-bit %s-endian; silence threshold %.1f dB for %.1f s",
                             decodedFormat.getSampleRate(),
                             decodedFormat.getChannels(),
                             decodedFormat.getSampleSizeInBits(),
                             activeOutputFormat.getSampleRate(),
                             activeOutputFormat.getChannels(),
                             activeOutputFormat.getSampleSizeInBits(),
+                        activeOutputFormat.isBigEndian() ? "big" : "little",
                             silenceThresholdDb,
                             silenceDurationSeconds));
             logDcsConfiguration();
@@ -984,8 +999,15 @@ public class StreamRecorder {
                 double frameGainDb = this.outputGainDb;
                 if (this.autoGainEnabled && gateAllowsAudio) {
                     double neededAutoGainDb = AUTO_GAIN_TARGET_DB - currentRmsDb;
-                    double boundedAutoGainDb = Math.max(0.0, Math.min(AUTO_GAIN_MAX_DB, neededAutoGainDb));
-                    frameGainDb += boundedAutoGainDb;
+                    double targetAutoGainDb = Math.max(0.0, Math.min(AUTO_GAIN_MAX_DB, neededAutoGainDb));
+                    double bufferDurationSec = (n / (double) frameSize) / frameRate;
+                    double delta = targetAutoGainDb - this.smoothedAutoGainDb;
+                    if (delta > 0.0) {
+                        this.smoothedAutoGainDb += Math.min(delta, AUTO_GAIN_ATTACK_DB_PER_SEC * bufferDurationSec);
+                    } else {
+                        this.smoothedAutoGainDb += Math.max(delta, -AUTO_GAIN_RELEASE_DB_PER_SEC * bufferDurationSec);
+                    }
+                    frameGainDb += this.smoothedAutoGainDb;
                 }
                 applyGainInPlace(currentBuffer, n, processingFormat, frameGainDb);
             }

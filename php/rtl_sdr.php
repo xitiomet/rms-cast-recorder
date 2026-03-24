@@ -1911,7 +1911,8 @@ function append_pipe_output_args(array &$command, array $config): void
 	}
 
 	if (parse_boolean_flag($config['pipeOutputBigEndian'] ?? 0, false)) {
-		$command[] = '--pipe-output-big-endian';
+		$command[] = '--pipe-output-endian';
+		$command[] = 'big';
 	}
 
 	$padEnabled = parse_boolean_flag($config['pipeOutputPad'] ?? 0, false);
@@ -9441,7 +9442,7 @@ function appendPipeOutputPreviewArgs(line, source)
 			line += ' --pipe-output-unsigned';
 		}
 		if (raw.bigEndian) {
-			line += ' --pipe-output-big-endian';
+			line += ' --pipe-output-endian big';
 		}
 		if (raw.pad) {
 			line += ' --pipe-output-pad';
