@@ -6684,6 +6684,7 @@ var queueStatusHideTimer = null;
 var queueStatusLastSignature = '';
 var QUEUE_STATUS_VISIBLE_MS = 20000;
 var streamPlayersByDevice = {};
+var STREAM_LISTEN_RETRY_DELAY_MS = 2000;
 var uiSettingsSaveTimer = null;
 var uiSettingsSaveInFlight = false;
 var uiSettingsSaveQueued = false;
@@ -8752,17 +8753,157 @@ function stopListeningForDevice(deviceId, silent)
 {
 	var key = String(deviceId);
 	var player = streamPlayersByDevice[key] || null;
-	if (player && player.audio) {
-		try {
-			player.audio.pause();
-			player.audio.src = '';
-		} catch (error) {
+	if (player) {
+		player.stopped = true;
+		if (player.retryTimer) {
+			window.clearTimeout(player.retryTimer);
+			player.retryTimer = null;
+		}
+		if (player.audio) {
+			try {
+				if (player.onError) {
+					player.audio.removeEventListener('error', player.onError);
+				}
+				if (player.onEnded) {
+					player.audio.removeEventListener('ended', player.onEnded);
+				}
+				if (player.onStalled) {
+					player.audio.removeEventListener('stalled', player.onStalled);
+				}
+				player.audio.pause();
+				player.audio.src = '';
+				player.audio.load();
+			} catch (error) {
+			}
+			player.audio = null;
 		}
 	}
 	delete streamPlayersByDevice[key];
 	if (!silent) {
 		setStatus('Stopped listening on device ' + key + '.', false);
 	}
+}
+
+function teardownStreamPlayerAudio(player)
+{
+	if (!player || !player.audio) {
+		return;
+	}
+
+	try {
+		if (player.onError) {
+			player.audio.removeEventListener('error', player.onError);
+		}
+		if (player.onEnded) {
+			player.audio.removeEventListener('ended', player.onEnded);
+		}
+		if (player.onStalled) {
+			player.audio.removeEventListener('stalled', player.onStalled);
+		}
+		player.audio.pause();
+		player.audio.src = '';
+		player.audio.load();
+	} catch (error) {
+	}
+
+	player.audio = null;
+	player.onError = null;
+	player.onEnded = null;
+	player.onStalled = null;
+}
+
+function scheduleStreamListenReconnect(deviceId, reason)
+{
+	var key = String(deviceId || '');
+	var player = streamPlayersByDevice[key] || null;
+	if (!player || player.stopped) {
+		return;
+	}
+
+	teardownStreamPlayerAudio(player);
+
+	if (player.retryTimer) {
+		window.clearTimeout(player.retryTimer);
+		player.retryTimer = null;
+	}
+
+	player.retryTimer = window.setTimeout(function () {
+		player.retryTimer = null;
+		attemptStreamListenPlayback(key);
+	}, STREAM_LISTEN_RETRY_DELAY_MS);
+
+	var reasonText = String(reason || '').trim();
+	if (reasonText === '') {
+		reasonText = 'stream interruption';
+	}
+	setStatus('Stream ' + reasonText + ' on device ' + key + '; retrying...', true);
+}
+
+function attemptStreamListenPlayback(deviceId)
+{
+	var key = String(deviceId || '');
+	var player = streamPlayersByDevice[key] || null;
+	if (!player || player.stopped) {
+		return;
+	}
+	if (player.connecting) {
+		return;
+	}
+
+	player.connecting = true;
+	if (player.retryTimer) {
+		window.clearTimeout(player.retryTimer);
+		player.retryTimer = null;
+	}
+
+	teardownStreamPlayerAudio(player);
+
+	var audio = new Audio(player.url);
+	audio.preload = 'none';
+
+	var onStreamProblem = function () {
+		if (player.stopped) {
+			return;
+		}
+		player.connecting = false;
+		player.retries = (Number(player.retries) || 0) + 1;
+		scheduleStreamListenReconnect(key, 'unavailable');
+	};
+
+	player.audio = audio;
+	player.onError = onStreamProblem;
+	player.onEnded = onStreamProblem;
+	player.onStalled = onStreamProblem;
+	audio.addEventListener('error', player.onError);
+	audio.addEventListener('ended', player.onEnded);
+	audio.addEventListener('stalled', player.onStalled);
+
+	var playPromise = audio.play();
+	if (playPromise && typeof playPromise.then === 'function') {
+		playPromise.then(function () {
+			if (player.stopped) {
+				teardownStreamPlayerAudio(player);
+				return;
+			}
+			player.connecting = false;
+			var hadRetries = (Number(player.retries) || 0) > 0;
+			player.retries = 0;
+			setStatus((hadRetries ? 'Reconnected. ' : '') + 'Listening on ' + player.url, false);
+		}).catch(function (error) {
+			if (player.stopped) {
+				teardownStreamPlayerAudio(player);
+				return;
+			}
+			player.connecting = false;
+			player.retries = (Number(player.retries) || 0) + 1;
+			scheduleStreamListenReconnect(key, (error && error.message) ? error.message : 'playback failure');
+		});
+		return;
+	}
+
+	player.connecting = false;
+	player.retries = 0;
+	setStatus('Listening on ' + player.url, false);
 }
 
 function listenToStreamForCard(card)
@@ -8792,30 +8933,20 @@ function listenToStreamForCard(card)
 		return;
 	}
 
-	var audio = new Audio(streamUrl);
-	audio.preload = 'none';
-	audio.addEventListener('error', function () {
-		stopListeningForDevice(deviceId, true);
-		renderDeviceList();
-		setStatus('Stream playback failed for device ' + deviceId + '.', true);
-	});
-
-	streamPlayersByDevice[deviceId] = { audio: audio, url: streamUrl };
-	var playPromise = audio.play();
-	if (playPromise && typeof playPromise.then === 'function') {
-		playPromise.then(function () {
-			renderDeviceList();
-			setStatus('Listening on ' + streamUrl, false);
-		}).catch(function (error) {
-			stopListeningForDevice(deviceId, true);
-			renderDeviceList();
-			setStatus(error && error.message ? error.message : 'Browser blocked playback.', true);
-		});
-		return;
-	}
-
+	streamPlayersByDevice[deviceId] = {
+		audio: null,
+		url: streamUrl,
+		stopped: false,
+		retryTimer: null,
+		onError: null,
+		onEnded: null,
+		onStalled: null,
+		connecting: false,
+		retries: 0
+	};
+	attemptStreamListenPlayback(deviceId);
 	renderDeviceList();
-	setStatus('Listening on ' + streamUrl, false);
+	setStatus('Connecting to ' + streamUrl + '...', false);
 }
 
 function copyStreamUrlForCard(card)
