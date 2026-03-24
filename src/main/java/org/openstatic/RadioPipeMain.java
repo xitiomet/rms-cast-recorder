@@ -78,6 +78,10 @@ public class RadioPipeMain
             .desc("Raw pipe output byte order is big-endian (default little-endian)").build());
         options.addOption(Option.builder().longOpt("pipe-output-unsigned")
             .desc("Raw pipe output samples are unsigned PCM (default signed PCM)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-pad")
+            .desc("When pipe raw mode is enabled, emit silence to --pipe-output commands while input stream stalls").build());
+        options.addOption(Option.builder().longOpt("pipe-output-pad-delay").hasArg().argName("MS")
+            .desc("Delay in milliseconds before pipe output pad starts emitting silence (default 500)").build());
         options.addOption(Option.builder().longOpt("stdout-raw")
             .desc("Write gated audio to stdout as raw PCM bytes").build());
         options.addOption(Option.builder().longOpt("stdout-pad")
@@ -157,6 +161,8 @@ public class RadioPipeMain
             String outputDeviceSelector = cmd.getOptionValue("dev");
             String[] pipeCommands = cmd.getOptionValues("pipe-output");
             boolean pipeOutputRaw = cmd.hasOption("pipe-output-raw");
+            boolean pipeOutputPad = cmd.hasOption("pipe-output-pad");
+            long pipeOutputPadDelayMs = Long.parseLong(cmd.getOptionValue("pipe-output-pad-delay", "500"));
             boolean stdoutRaw = cmd.hasOption("stdout-raw");
                 boolean stdoutPad = cmd.hasOption("stdout-pad");
                 long stdoutPadDelayMs = Long.parseLong(cmd.getOptionValue("stdout-pad-delay", "500"));
@@ -208,6 +214,13 @@ public class RadioPipeMain
             }
             if (hasPipeRawFormatFlags && !pipeOutputRaw) {
                 pipeOutputRaw = true;
+            }
+            if (pipeOutputPad) {
+                pipeOutputRaw = true;
+            }
+            if (cmd.hasOption("pipe-output-pad-delay")) {
+                pipeOutputRaw = true;
+                pipeOutputPad = true;
             }
             if (hasPipeInputRawFormatFlags && !pipeInputRaw) {
                 pipeInputRaw = true;
@@ -300,6 +313,9 @@ public class RadioPipeMain
             }
             if (stdoutPadDelayMs < 0) {
                 throw new ParseException("stdout-pad-delay must be >= 0 milliseconds");
+            }
+            if (pipeOutputPadDelayMs < 0) {
+                throw new ParseException("pipe-output-pad-delay must be >= 0 milliseconds");
             }
             if (outDir == null && onWriteProgram != null) {
                 throw new ParseException("--on-write requires file recording; provide -o when using --stdout");
@@ -484,7 +500,7 @@ public class RadioPipeMain
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
             recorder.setPipeOutputs(pipeCommands);
-            recorder.setPipeRawOutput(pipeOutputRaw, pipeOutputRawFormat);
+            recorder.setPipeRawOutput(pipeOutputRaw, pipeOutputRawFormat, pipeOutputPad, pipeOutputPadDelayMs);
             recorder.setPipeInput(usePipeInput ? pipeInputCommand : null, pipeInputRaw, pipeInputRawFormat);
             recorder.setApiWebSocketServer(apiWebSocketServer);
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;

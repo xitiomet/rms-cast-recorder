@@ -226,12 +226,14 @@ $ ./radio-pipe -u http://example.com:8000/stream.mp3 \
   -o ./recordings \
   --pipe-output "aplay -f S16_LE -r 8000 -c 1" \
   --pipe-output-raw \
+  --pipe-output-pad \
+  --pipe-output-pad-delay 500 \
   --pipe-output-rate 8000 \
   --pipe-output-channels 1 \
   --pipe-output-bits 16
 ```
 
-`--pipe-output` is always WAV clip output. Use `--pipe-output-raw` to send raw PCM stream to the same pipe commands. Raw format flags are `--pipe-output-rate`, `--pipe-output-channels`, `--pipe-output-bits`, `--pipe-output-big-endian`, and `--pipe-output-unsigned`.
+`--pipe-output` is always WAV clip output. Use `--pipe-output-raw` to send raw PCM stream to the same pipe commands. Raw format flags are `--pipe-output-rate`, `--pipe-output-channels`, `--pipe-output-bits`, `--pipe-output-big-endian`, and `--pipe-output-unsigned`. Use `--pipe-output-pad` to emit silence while input stalls (with optional `--pipe-output-pad-delay` buffer, default 500 ms).
 
 Note: Combining higher fixed `--gain` values with `--auto-gain` can increase clipping on loud signals; reduce `--gain` if output sounds distorted.
 
