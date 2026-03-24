@@ -133,6 +133,8 @@ public class RadioPipeMain
             .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 0)").build());
         options.addOption(Option.builder().longOpt("gain").hasArg().argName("DB")
             .desc("Apply fixed post-gate gain in dB before recording/stdout (range -60 to +60, default 0)").build());
+        options.addOption(Option.builder().longOpt("voice-filter")
+            .desc("Apply post-gate voice band-pass filtering (300-3400 Hz) before gain/output").build());
         options.addOption(Option.builder().longOpt("auto-gain")
             .desc("Enable automatic post-gate gain boost toward a target level").build());
         options.addOption(Option.builder().longOpt("api-websocket").hasArg().argName("HOST:PORT")
@@ -298,6 +300,7 @@ public class RadioPipeMain
                 throw new ParseException("gain must be a numeric value in dB");
             }
             boolean autoGain = cmd.hasOption("auto-gain");
+            boolean voiceFilter = cmd.hasOption("voice-filter");
             AudioFormat pipeInputRawFormat = null;
             AudioFormat stdoutRawFormat = null;
             AudioFormat pipeOutputRawFormat = null;
@@ -527,6 +530,7 @@ public class RadioPipeMain
             }
             recorder.setInputDejitterMillis(inputDejitterMs);
             recorder.setGateHoldSeconds(gateHoldSeconds);
+            recorder.setVoiceFilterEnabled(voiceFilter);
             recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
@@ -781,6 +785,7 @@ public class RadioPipeMain
         HelpFormatter formatter = new HelpFormatter();
         formatter.printHelp( "radio-pipe", "RadioPipe: record shoutcast/icecast streams or stdin audio", options, "" );
         System.err.println("For more information please visit https://openstatic.org/projects/radio-pipe");
+        System.err.println("Developed by KC1TCD with contributions from the open source community.");
         System.exit(0);
     }
 }
