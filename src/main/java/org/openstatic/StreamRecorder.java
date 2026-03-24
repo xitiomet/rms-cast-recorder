@@ -1472,7 +1472,7 @@ public class StreamRecorder {
             return;
         }
 
-        AudioFormat targetFormat = (this.stdoutRawFormat == null) ? sourceFormat : this.stdoutRawFormat;
+        AudioFormat targetFormat = (this.pipeRawFormat == null) ? sourceFormat : this.pipeRawFormat;
 
         if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
             for (PipeOutputSession session : sessions) {
