@@ -64,9 +64,21 @@
           ]
         }
       ]
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData"
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData_en"
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData_en_US"
     }
   ],
   "resources": [
+    {
+      "glob": "META-INF/services/java.time.zone.ZoneRulesProvider"
+    },
     {
       "glob": "META-INF/services/javax.sound.sampled.spi.AudioFileReader"
     },
