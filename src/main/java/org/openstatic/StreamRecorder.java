@@ -592,6 +592,11 @@ public class StreamRecorder {
         Mixer.Info mixerInfo = resolveInputMixerInfo(selector);
         Mixer mixer = AudioSystem.getMixer(mixerInfo);
 
+        if (this.streamNameOverride == null) {
+            this.streamTitle = normalizeStreamTitle(mixerInfo.getName());
+            this.streamLabel = sanitizeStreamName(this.streamTitle);
+        }
+
         AudioFormat captureFormat = (this.inputDeviceCaptureFormat != null)
                 ? this.inputDeviceCaptureFormat
                 : new AudioFormat(
