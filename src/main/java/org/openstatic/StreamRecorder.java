@@ -102,6 +102,7 @@ public class StreamRecorder {
     private volatile double smoothedAutoGainDb;
     private volatile boolean voiceFilterEnabled;
     private volatile String inputDeviceSelector;
+    private volatile AudioFormat inputDeviceCaptureFormat;
     private volatile ApiWebSocketServer apiWebSocketServer;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
@@ -260,6 +261,7 @@ public class StreamRecorder {
         this.smoothedAutoGainDb = 0.0;
         this.voiceFilterEnabled = false;
         this.inputDeviceSelector = null;
+        this.inputDeviceCaptureFormat = null;
         this.apiWebSocketServer = null;
     }
 
@@ -360,8 +362,9 @@ public class StreamRecorder {
         this.deviceConfigLogged = false;
     }
 
-    public void setDeviceInput(String deviceSelector) {
+    public void setDeviceInput(String deviceSelector, AudioFormat captureFormat) {
         this.inputDeviceSelector = isBlank(deviceSelector) ? null : deviceSelector.trim();
+        this.inputDeviceCaptureFormat = captureFormat;
     }
 
     public void setPipeOutputs(String[] pipeCommands) {
@@ -589,14 +592,16 @@ public class StreamRecorder {
         Mixer.Info mixerInfo = resolveInputMixerInfo(selector);
         Mixer mixer = AudioSystem.getMixer(mixerInfo);
 
-        AudioFormat captureFormat = new AudioFormat(
-                AudioFormat.Encoding.PCM_SIGNED,
-                this.outputSampleRate,
-                this.outputBitDepth,
-                this.outputChannels,
-                this.outputChannels * (this.outputBitDepth / 8),
-                this.outputSampleRate,
-                this.outputBigEndian);
+        AudioFormat captureFormat = (this.inputDeviceCaptureFormat != null)
+                ? this.inputDeviceCaptureFormat
+                : new AudioFormat(
+                        AudioFormat.Encoding.PCM_SIGNED,
+                        this.outputSampleRate,
+                        this.outputBitDepth,
+                        this.outputChannels,
+                        this.outputChannels * (this.outputBitDepth / 8),
+                        this.outputSampleRate,
+                        this.outputBigEndian);
 
         DataLine.Info lineInfo = new DataLine.Info(TargetDataLine.class, captureFormat);
         if (!mixer.isLineSupported(lineInfo)) {

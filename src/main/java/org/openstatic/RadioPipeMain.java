@@ -62,6 +62,14 @@ public class RadioPipeMain
             .desc("Read audio from a hardware input device (index from --input-devs or mixer name; use exactly one of --url, --stdin, --pipe-input, or --input-dev)").build());
         options.addOption(Option.builder().longOpt("input-devs")
             .desc("List available hardware input devices and exit").build());
+        options.addOption(Option.builder().longOpt("input-dev-sample-rate").hasArg().argName("HZ")
+            .desc("Input device capture sample rate in Hz (default matches --sample-rate)").build());
+        options.addOption(Option.builder().longOpt("input-dev-channels").hasArg().argName("N")
+            .desc("Input device capture channel count (default matches --channels)").build());
+        options.addOption(Option.builder().longOpt("input-dev-bits").hasArg().argName("BITS")
+            .desc("Input device capture bit depth (default matches --bitrate)").build());
+        options.addOption(Option.builder().longOpt("input-dev-endian").hasArg().argName("ORDER")
+            .desc("Input device capture byte order: little or big (default matches --endian)").build());
         options.addOption(Option.builder().longOpt("input-dejitter").hasArg().argName("MS")
             .desc("Input de-jitter buffer in milliseconds to smooth bursty piped input (default 250)").build());
         options.addOption(Option.builder().longOpt("stdout")
@@ -275,12 +283,13 @@ public class RadioPipeMain
             boolean hasOutDir = cmd.hasOption("o");
             Path outDir = null;
             ResolvedRecordingsDirectory resolvedRecordingsDirectory = null;
-            boolean outputOnlyMode = (useStdout || usePipeOutput) && !hasOutDir;
+            boolean useOutputDev = outputDeviceSelector != null;
+            boolean outputOnlyMode = (useStdout || usePipeOutput || useOutputDev) && !hasOutDir;
             if (!outputOnlyMode) {
                 resolvedRecordingsDirectory = resolveRecordingsDirectory(cmd.getOptionValue("o"));
                 outDir = ensureRecordingsDirectory(resolvedRecordingsDirectory.directory);
             }
-            logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, usePipeOutput, hasOutDir);
+            logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, usePipeOutput, useOutputDev, hasOutDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
             float defaultSampleRate = Float.parseFloat(cmd.getOptionValue("sample-rate", "8000"));
@@ -320,6 +329,7 @@ public class RadioPipeMain
             AudioFormat pipeInputRawFormat = null;
             AudioFormat stdoutRawFormat = null;
             AudioFormat pipeOutputRawFormat = null;
+            AudioFormat inputDevFormat = null;
 
             if (defaultSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
@@ -468,6 +478,32 @@ public class RadioPipeMain
                         pipeInputBigEndian);
             }
 
+            if (useInputDev) {
+                float idSampleRate = Float.parseFloat(cmd.getOptionValue("input-dev-sample-rate", String.valueOf(defaultSampleRate)));
+                int idChannels = Integer.parseInt(cmd.getOptionValue("input-dev-channels", String.valueOf(defaultChannels)));
+                int idBitDepth = Integer.parseInt(cmd.getOptionValue("input-dev-bits", String.valueOf(defaultBitDepth)));
+                boolean idBigEndian = resolveEndianOption(cmd, "input-dev-endian", defaultBigEndian);
+
+                if (idSampleRate <= 0) {
+                    throw new ParseException("input-dev-sample-rate must be > 0");
+                }
+                if (idChannels <= 0) {
+                    throw new ParseException("input-dev-channels must be > 0");
+                }
+                if (idBitDepth <= 0 || idBitDepth % 8 != 0) {
+                    throw new ParseException("input-dev-bits must be a positive multiple of 8");
+                }
+
+                inputDevFormat = new AudioFormat(
+                        AudioFormat.Encoding.PCM_SIGNED,
+                        idSampleRate,
+                        idBitDepth,
+                        idChannels,
+                        idChannels * (idBitDepth / 8),
+                        idSampleRate,
+                        idBigEndian);
+            }
+
             StreamRecorder recorder;
             if (useInputDev) {
                 recorder = new StreamRecorder(
@@ -562,7 +598,7 @@ public class RadioPipeMain
             recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
-            recorder.setDeviceInput(useInputDev ? inputDeviceSelector : null);
+            recorder.setDeviceInput(useInputDev ? inputDeviceSelector : null, inputDevFormat);
             recorder.setPipeOutputs(pipeCommands);
             recorder.setPipeRawOutput(pipeOutputRaw, pipeOutputRawFormat, pipeOutputPad, pipeOutputPadDelayMs);
             recorder.setPipeInput(usePipeInput ? pipeInputCommand : null, pipeInputRaw, pipeInputRawFormat);
@@ -801,17 +837,16 @@ public class RadioPipeMain
                                                         ResolvedRecordingsDirectory resolvedRecordingsDirectory,
                                                         boolean useStdout,
                                                         boolean usePipeOutput,
+                                                        boolean useOutputDev,
                                                         boolean hasOutDir)
     {
         if (outDir == null) {
-            if ((useStdout || usePipeOutput) && !hasOutDir) {
-                if (useStdout && usePipeOutput) {
-                    System.err.println("startup: file recording disabled (output-only mode: --stdout/--pipe-output without -o)");
-                } else if (useStdout) {
-                    System.err.println("startup: file recording disabled (stdout-only mode: --stdout without -o)");
-                } else {
-                    System.err.println("startup: file recording disabled (pipe-output-only mode: --pipe-output without -o)");
-                }
+            if ((useStdout || usePipeOutput || useOutputDev) && !hasOutDir) {
+                StringBuilder modes = new StringBuilder();
+                if (useStdout) modes.append("--stdout");
+                if (usePipeOutput) { if (modes.length() > 0) modes.append("/"); modes.append("--pipe-output"); }
+                if (useOutputDev) { if (modes.length() > 0) modes.append("/"); modes.append("--output-dev"); }
+                System.err.println("startup: file recording disabled (output-only mode: " + modes + " without -o)");
             } else {
                 System.err.println("startup: file recording disabled (no recordings directory configured)");
             }
