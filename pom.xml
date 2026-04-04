@@ -249,6 +249,7 @@
                     --report-unsupported-elements-at-runtime
                     -H:+ReportExceptionStackTraces
                     -H:+AllowDeprecatedBuilderClassesOnImageClasspath
+                    -l:asound
                 </buildArgs>
             </configuration>
        </plugin>
