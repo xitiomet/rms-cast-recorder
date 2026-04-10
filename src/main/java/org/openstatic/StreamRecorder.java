@@ -101,6 +101,8 @@ public class StreamRecorder {
     private volatile boolean autoGainEnabled;
     private volatile double smoothedAutoGainDb;
     private volatile boolean voiceFilterEnabled;
+    private volatile boolean deemphasisEnabled;
+    private volatile double deemphasisTau;
     private volatile String inputDeviceSelector;
     private volatile AudioFormat inputDeviceCaptureFormat;
     private volatile ApiWebSocketServer apiWebSocketServer;
@@ -260,6 +262,8 @@ public class StreamRecorder {
         this.autoGainEnabled = false;
         this.smoothedAutoGainDb = 0.0;
         this.voiceFilterEnabled = false;
+        this.deemphasisEnabled = false;
+        this.deemphasisTau = DeemphasisFilter.TAU_75_US;
         this.inputDeviceSelector = null;
         this.inputDeviceCaptureFormat = null;
         this.apiWebSocketServer = null;
@@ -437,6 +441,11 @@ public class StreamRecorder {
 
     public void setVoiceFilterEnabled(boolean voiceFilterEnabled) {
         this.voiceFilterEnabled = voiceFilterEnabled;
+    }
+
+    public void setDeemphasis(boolean enabled, double tauSeconds) {
+        this.deemphasisEnabled = enabled;
+        this.deemphasisTau = (tauSeconds > 0.0) ? tauSeconds : DeemphasisFilter.TAU_75_US;
     }
 
     private boolean canWriteRecordings() {
@@ -773,6 +782,7 @@ public class StreamRecorder {
             logStdoutConfiguration(activeOutputFormat);
             logDeviceConfiguration(activeOutputFormat);
             logPipeConfiguration(activeOutputFormat);
+            logDeemphasisConfiguration();
             logVoiceFilterConfiguration();
             logGainConfiguration();
             processStream(din, decodedFormat, activeOutputFormat);
@@ -818,6 +828,9 @@ public class StreamRecorder {
         String lastUngatedDcsLabel = null;
         String lastUngatedDcsPolarity = null;
         long nextStatusEmitNanos = statusClockNanos + TimeUnit.MILLISECONDS.toNanos(250L);
+        DeemphasisFilter deemphasisFilter = this.deemphasisEnabled
+            ? DeemphasisFilter.forFormat(processingFormat, this.deemphasisTau)
+            : null;
         VoiceBandPassFilter voiceBandPassFilter = this.voiceFilterEnabled
             ? VoiceBandPassFilter.forFormat(processingFormat)
             : null;
@@ -1146,6 +1159,9 @@ public class StreamRecorder {
             }
             if (includeFrameInClip) {
                 double gainReferenceRmsDb = currentRmsDb;
+                if (gateAllowsAudio && deemphasisFilter != null) {
+                    deemphasisFilter.processInPlace(currentBuffer, n, processingFormat);
+                }
                 if (gateAllowsAudio && voiceBandPassFilter != null) {
                     voiceBandPassFilter.processInPlace(currentBuffer, n, processingFormat);
                     gainReferenceRmsDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
@@ -1416,6 +1432,16 @@ public class StreamRecorder {
                             AUTO_GAIN_TARGET_DB,
                             AUTO_GAIN_MAX_DB));
         }
+    }
+
+    private void logDeemphasisConfiguration() {
+        if (!this.deemphasisEnabled) {
+            return;
+        }
+
+        log("FILTER", ANSI_CYAN,
+                "De-emphasis filter enabled: tau=" + DeemphasisFilter.describeTau(this.deemphasisTau)
+                        + " applied post-gate before voice filter/gain.");
     }
 
     private void logVoiceFilterConfiguration() {

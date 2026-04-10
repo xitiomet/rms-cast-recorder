@@ -149,6 +149,8 @@ public class RadioPipeMain
             .desc("Apply fixed post-gate gain in dB before recording/stdout (range -60 to +60, default 0)").build());
         options.addOption(Option.builder().longOpt("voice-filter")
             .desc("Apply post-gate voice band-pass filtering (300-3400 Hz) before gain/output").build());
+        options.addOption(Option.builder().longOpt("deemphasis").hasArg().optionalArg(true).argName("TAU")
+            .desc("Apply FM de-emphasis filter (default 75 µs for Americas; use 50 for Europe/Asia)").build());
         options.addOption(Option.builder().longOpt("auto-gain")
             .desc("Enable automatic post-gate gain boost toward a target level").build());
         options.addOption(Option.builder().longOpt("api-websocket").hasArg().argName("HOST:PORT")
@@ -326,6 +328,24 @@ public class RadioPipeMain
             }
             boolean autoGain = cmd.hasOption("auto-gain");
             boolean voiceFilter = cmd.hasOption("voice-filter");
+            boolean deemphasis = cmd.hasOption("deemphasis");
+            double deemphasisTau = DeemphasisFilter.TAU_75_US;
+            if (deemphasis) {
+                String tauArg = cmd.getOptionValue("deemphasis");
+                if (tauArg != null) {
+                    tauArg = tauArg.trim();
+                    try {
+                        double parsed = Double.parseDouble(tauArg);
+                        if (parsed > 0 && parsed < 1000) {
+                            deemphasisTau = parsed * 1.0e-6;
+                        } else {
+                            throw new ParseException("deemphasis tau must be between 0 and 1000 µs");
+                        }
+                    } catch (NumberFormatException nfe) {
+                        throw new ParseException("deemphasis tau must be a numeric value in µs (e.g. 75 or 50)");
+                    }
+                }
+            }
             AudioFormat pipeInputRawFormat = null;
             AudioFormat stdoutRawFormat = null;
             AudioFormat pipeOutputRawFormat = null;
@@ -595,6 +615,9 @@ public class RadioPipeMain
             recorder.setInputDejitterMillis(inputDejitterMs);
             recorder.setGateHoldSeconds(gateHoldSeconds);
             recorder.setVoiceFilterEnabled(voiceFilter);
+            if (deemphasis) {
+                recorder.setDeemphasis(true, deemphasisTau);
+            }
             recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
