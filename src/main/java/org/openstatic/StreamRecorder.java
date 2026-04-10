@@ -1450,7 +1450,7 @@ public class StreamRecorder {
         }
 
         log("FILTER", ANSI_CYAN,
-                "Voice filter enabled: post-gate band-pass 300-3400 Hz before gain/output.");
+                "Voice filter enabled: post-gate Butterworth band-pass 300-3400 Hz (12 dB/octave) before gain/output.");
     }
 
     private static void applyGainInPlace(byte[] data, int len, AudioFormat format, double gainDb) {
@@ -1488,109 +1488,6 @@ public class StreamRecorder {
             } else {
                 data[offset] = (byte) (amplified & 0xFF);
                 data[offset + 1] = (byte) ((amplified >>> 8) & 0xFF);
-            }
-        }
-    }
-
-    private static final class VoiceBandPassFilter {
-        private static final double DEFAULT_LOW_CUTOFF_HZ = 300.0;
-        private static final double DEFAULT_HIGH_CUTOFF_HZ = 3400.0;
-        private final boolean bigEndian;
-        private final int channels;
-        private final double hpAlpha;
-        private final double lpAlpha;
-        private final double[] hpPrevInput;
-        private final double[] hpPrevOutput;
-        private final double[] lpPrevOutput;
-
-        private VoiceBandPassFilter(boolean bigEndian,
-                                    int channels,
-                                    double hpAlpha,
-                                    double lpAlpha) {
-            this.bigEndian = bigEndian;
-            this.channels = channels;
-            this.hpAlpha = hpAlpha;
-            this.lpAlpha = lpAlpha;
-            this.hpPrevInput = new double[channels];
-            this.hpPrevOutput = new double[channels];
-            this.lpPrevOutput = new double[channels];
-        }
-
-        static VoiceBandPassFilter forFormat(AudioFormat format) {
-            if (format == null || format.getSampleSizeInBits() != 16 || format.getChannels() <= 0) {
-                return null;
-            }
-            double sampleRate = format.getSampleRate();
-            if (!(sampleRate > 0.0)) {
-                return null;
-            }
-
-            double lowCut = Math.max(50.0, Math.min(DEFAULT_LOW_CUTOFF_HZ, (sampleRate * 0.45)));
-            double highCut = Math.max(lowCut + 100.0, Math.min(DEFAULT_HIGH_CUTOFF_HZ, sampleRate * 0.49));
-            if (highCut <= lowCut) {
-                return null;
-            }
-
-            double dt = 1.0 / sampleRate;
-            double hpRc = 1.0 / (2.0 * Math.PI * lowCut);
-            double lpRc = 1.0 / (2.0 * Math.PI * highCut);
-            double hpAlpha = hpRc / (hpRc + dt);
-            double lpAlpha = dt / (lpRc + dt);
-
-            return new VoiceBandPassFilter(format.isBigEndian(), format.getChannels(), hpAlpha, lpAlpha);
-        }
-
-        void processInPlace(byte[] data, int len, AudioFormat format) {
-            if (data == null || len <= 1 || format.getSampleSizeInBits() != 16 || this.channels <= 0) {
-                return;
-            }
-
-            int frameSize = format.getFrameSize();
-            if (frameSize <= 0) {
-                return;
-            }
-
-            int frames = len / frameSize;
-            int offset = 0;
-            for (int frame = 0; frame < frames; frame++) {
-                for (int channel = 0; channel < this.channels && offset + 1 < len; channel++) {
-                    int sample;
-                    if (this.bigEndian) {
-                        int hi = data[offset];
-                        int lo = data[offset + 1] & 0xff;
-                        sample = (hi << 8) | lo;
-                    } else {
-                        int lo = data[offset] & 0xff;
-                        int hi = data[offset + 1];
-                        sample = (hi << 8) | lo;
-                    }
-
-                    double input = sample;
-                    double highPassed = this.hpAlpha * (this.hpPrevOutput[channel] + input - this.hpPrevInput[channel]);
-                    this.hpPrevInput[channel] = input;
-                    this.hpPrevOutput[channel] = highPassed;
-
-                    double lowPassed = this.lpPrevOutput[channel] + this.lpAlpha * (highPassed - this.lpPrevOutput[channel]);
-                    this.lpPrevOutput[channel] = lowPassed;
-
-                    int filtered = (int) Math.round(lowPassed);
-                    if (filtered > 32767) {
-                        filtered = 32767;
-                    } else if (filtered < -32768) {
-                        filtered = -32768;
-                    }
-
-                    if (this.bigEndian) {
-                        data[offset] = (byte) ((filtered >>> 8) & 0xFF);
-                        data[offset + 1] = (byte) (filtered & 0xFF);
-                    } else {
-                        data[offset] = (byte) (filtered & 0xFF);
-                        data[offset + 1] = (byte) ((filtered >>> 8) & 0xFF);
-                    }
-
-                    offset += 2;
-                }
-                offset = frameSize * (frame + 1);
             }
         }
     }
