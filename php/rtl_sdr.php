@@ -3598,6 +3598,17 @@ function normalize_config(array $input, string $defaultOutputDir): array
 
 	$autoGainEnabled = parse_boolean_flag($input['autoGain'] ?? ($input['radioPipeAutoGain'] ?? '0'), false);
 	$voiceFilterEnabled = parse_boolean_flag($input['voiceFilter'] ?? ($input['radioPipeVoiceFilter'] ?? '0'), false);
+	$deemphasisEnabled = parse_boolean_flag($input['deemphasis'] ?? '0', false);
+	$deemphasisTau = trim((string)($input['deemphasisTau'] ?? '75'));
+	if ($deemphasisTau !== '' && !preg_match('/^[0-9]{1,4}$/', $deemphasisTau)) {
+		throw new RuntimeException('De-emphasis TAU must be an integer between 0 and 1000 µs.');
+	}
+	if ($deemphasisTau !== '') {
+		$deemphasisTauValue = (int)$deemphasisTau;
+		if ($deemphasisTauValue < 0 || $deemphasisTauValue > 1000) {
+			throw new RuntimeException('De-emphasis TAU must be between 0 and 1000 µs.');
+		}
+	}
 	$pipeOutputEnabled = parse_boolean_flag($input['pipeOutputEnabled'] ?? ($input['enablePipeOutput'] ?? '1'), false);
 	$pipeOutputs = normalize_pipe_output_entries($input['pipeOutputs'] ?? ($input['pipeOutputEntries'] ?? ($input['pipeOutput'] ?? array())));
 	$pipeOutputRawEnabled = parse_boolean_flag($input['pipeOutputRaw'] ?? 0, false);
@@ -3828,6 +3839,8 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'inputDejitter' => $inputDejitter,
 		'autoGain' => $autoGainEnabled ? 1 : 0,
 		'voiceFilter' => $voiceFilterEnabled ? 1 : 0,
+		'deemphasis' => $deemphasisEnabled ? 1 : 0,
+		'deemphasisTau' => $deemphasisTau,
 		'pipeOutputEnabled' => $pipeOutputEnabled ? 1 : 0,
 		'pipeOutputs' => $pipeOutputs,
 		'pipeOutputRaw' => $pipeOutputRawEnabled ? 1 : 0,
@@ -4195,6 +4208,14 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		$conditionerCommand[] = '--voice-filter';
 	}
 
+	if (parse_boolean_flag($config['deemphasis'] ?? 0, false)) {
+		$conditionerCommand[] = '--deemphasis';
+		$deTau = trim((string)($config['deemphasisTau'] ?? '75'));
+		if ($deTau !== '' && $deTau !== '75') {
+			$conditionerCommand[] = $deTau;
+		}
+	}
+
 	append_pipe_output_args($conditionerCommand, $config);
 
 	array_push(
@@ -4313,6 +4334,14 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 
 	if (parse_boolean_flag($config['voiceFilter'] ?? 0, false)) {
 		$recorderCommand[] = '--voice-filter';
+	}
+
+	if (parse_boolean_flag($config['deemphasis'] ?? 0, false)) {
+		$recorderCommand[] = '--deemphasis';
+		$deTau = trim((string)($config['deemphasisTau'] ?? '75'));
+		if ($deTau !== '' && $deTau !== '75') {
+			$recorderCommand[] = $deTau;
+		}
 	}
 
 	append_pipe_output_args($recorderCommand, $config);
@@ -9164,6 +9193,8 @@ function sanitizeTemplateConfig(config)
 	clean.postGain = normalizeClientPostGainValue(clean.postGain);
 	clean.autoGain = parseClientBooleanFlag(clean.autoGain, false) ? '1' : '0';
 	clean.voiceFilter = parseClientBooleanFlag(clean.voiceFilter, false) ? '1' : '0';
+	clean.deemphasis = parseClientBooleanFlag(clean.deemphasis, false) ? '1' : '0';
+	clean.deemphasisTau = String(clean.deemphasisTau || '75');
 	clean.pipeOutputEnabled = parseClientBooleanFlag(clean.pipeOutputEnabled, false) ? '1' : '0';
 	clean.pipeOutputs = normalizeClientPipeOutputEntries(clean.pipeOutputs);
 	clean.pipeOutputPresetIds = normalizePipeOutputPresetIdList(clean.pipeOutputPresetIds);
@@ -9238,6 +9269,8 @@ function applyTemplateToDevice(deviceId, templateName, currentConfigOverride)
 	merged.postGain = normalizeClientPostGainValue(merged.postGain);
 	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
 	merged.voiceFilter = parseClientBooleanFlag(merged.voiceFilter, false) ? '1' : '0';
+	merged.deemphasis = parseClientBooleanFlag(merged.deemphasis, false) ? '1' : '0';
+	merged.deemphasisTau = String(merged.deemphasisTau || '75');
 	merged.pipeOutputEnabled = parseClientBooleanFlag(merged.pipeOutputEnabled, false) ? '1' : '0';
 	merged.pipeOutputs = normalizeClientPipeOutputEntries(merged.pipeOutputs);
 	merged.pipeOutputPresetIds = normalizePipeOutputPresetIdList(merged.pipeOutputPresetIds);
@@ -9322,6 +9355,8 @@ function getDefaultConfig(deviceId)
 		postGain: '',
 		autoGain: '0',
 		voiceFilter: '0',
+		deemphasis: '0',
+		deemphasisTau: '75',
 		pipeOutputEnabled: '1',
 		pipeOutputs: [],
 		pipeOutputPresetIds: [],
@@ -9903,6 +9938,8 @@ function buildPipelineStagePreviewLines(config)
 	}
 	var autoGainEnabled = parseClientBooleanFlag(source.autoGain, false);
 	var voiceFilterEnabled = parseClientBooleanFlag(source.voiceFilter, false);
+	var deemphasisEnabled = parseClientBooleanFlag(source.deemphasis, false);
+	var deemphasisTau = String(source.deemphasisTau || '75').trim();
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
 		var recorderBothLine = 'radio-pipe --stdin --stdin-rate ' + effectiveStdinRate;
 		if (effectiveInputDejitter !== '') {
@@ -9926,6 +9963,12 @@ function buildPipelineStagePreviewLines(config)
 		}
 		if (voiceFilterEnabled) {
 			recorderBothLine += ' --voice-filter';
+		}
+		if (deemphasisEnabled) {
+			recorderBothLine += ' --deemphasis';
+			if (deemphasisTau !== '' && deemphasisTau !== '75') {
+				recorderBothLine += ' ' + deemphasisTau;
+			}
 		}
 		recorderBothLine = appendPipeOutputPreviewArgs(recorderBothLine, source);
 		lines.push(recorderBothLine);
@@ -9951,6 +9994,12 @@ function buildPipelineStagePreviewLines(config)
 		if (voiceFilterEnabled) {
 			conditionerLine += ' --voice-filter';
 		}
+		if (deemphasisEnabled) {
+			conditionerLine += ' --deemphasis';
+			if (deemphasisTau !== '' && deemphasisTau !== '75') {
+				conditionerLine += ' ' + deemphasisTau;
+			}
+		}
 		conditionerLine = appendPipeOutputPreviewArgs(conditionerLine, source);
 		lines.push(conditionerLine);
 	} else {
@@ -9974,6 +10023,12 @@ function buildPipelineStagePreviewLines(config)
 		}
 		if (voiceFilterEnabled) {
 			recorderLine += ' --voice-filter';
+		}
+		if (deemphasisEnabled) {
+			recorderLine += ' --deemphasis';
+			if (deemphasisTau !== '' && deemphasisTau !== '75') {
+				recorderLine += ' ' + deemphasisTau;
+			}
 		}
 		recorderLine = appendPipeOutputPreviewArgs(recorderLine, source);
 		var afterRecordAction = String(source.afterRecordAction || 'none').toLowerCase();
@@ -11678,6 +11733,11 @@ function renderDeviceList()
 						'<div>' +
 							'<label class="checkbox-label"><input type="checkbox" class="field-auto-gain"' + (parseClientBooleanFlag(config.autoGain, false) ? ' checked' : '') + '> Enable radio-pipe Auto Gain</label>' +
 							'<label class="checkbox-label"><input type="checkbox" class="field-voice-filter"' + (parseClientBooleanFlag(config.voiceFilter, false) ? ' checked' : '') + '> Enable radio-pipe Voice Filter</label>' +
+							'<label class="checkbox-label"><input type="checkbox" class="field-deemphasis"' + (parseClientBooleanFlag(config.deemphasis, false) ? ' checked' : '') + '> Enable De-emphasis</label>' +
+							'<div style="display:flex;align-items:center;gap:6px;margin-top:2px;">' +
+								'<label style="margin:0;white-space:nowrap;">TAU (µs)</label>' +
+								'<input type="number" min="0" max="1000" step="1" class="field-deemphasis-tau" value="' + escapeHtml(String(config.deemphasisTau || '75')) + '" style="width:80px;">' +
+							'</div>' +
 						'</div>' +
 					'</div>' +
 					'<div class="form-row single">' +
@@ -11970,6 +12030,8 @@ function readCardConfig(card)
 		postGain: normalizeClientPostGainValue(card.querySelector('.field-post-gain').value),
 		autoGain: !!(card.querySelector('.field-auto-gain') && card.querySelector('.field-auto-gain').checked) ? '1' : '0',
 		voiceFilter: !!(card.querySelector('.field-voice-filter') && card.querySelector('.field-voice-filter').checked) ? '1' : '0',
+		deemphasis: !!(card.querySelector('.field-deemphasis') && card.querySelector('.field-deemphasis').checked) ? '1' : '0',
+		deemphasisTau: card.querySelector('.field-deemphasis-tau') ? card.querySelector('.field-deemphasis-tau').value.trim() : '75',
 		pipeOutputEnabled: '1',
 		pipeOutputs: [],
 		pipeOutputPresetIds: selectedPipeOutputPresetIds,
@@ -12220,6 +12282,14 @@ function bindDeviceCard(card)
 	}
 	if (voiceFilterCheckbox) {
 		voiceFilterCheckbox.checked = parseClientBooleanFlag(storedConfig.voiceFilter, false);
+	}
+	var deemphasisCheckbox = card.querySelector('.field-deemphasis');
+	if (deemphasisCheckbox) {
+		deemphasisCheckbox.checked = parseClientBooleanFlag(storedConfig.deemphasis, false);
+	}
+	var deemphasisTauInput = card.querySelector('.field-deemphasis-tau');
+	if (deemphasisTauInput) {
+		deemphasisTauInput.value = String(storedConfig.deemphasisTau || '75');
 	}
 	if (pipeOutputPresetsList) {
 		pipeOutputPresetsList.innerHTML = buildPipeOutputPresetCheckboxesMarkup(selectedPresetIds);
