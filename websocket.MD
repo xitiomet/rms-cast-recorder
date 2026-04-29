@@ -33,6 +33,7 @@ Common fields in every packet:
 - `hookExecuted`: `--on-write` hook process started
 - `hookResult`: output line and/or completion from hook process
 - `status`: periodic snapshot event (every 250ms)
+- `commandResponse`: reply to an incoming command sent by a client (see [Commands](#commands))
 
 ### DCS detected
 
@@ -156,6 +157,7 @@ Fields:
 - `audioDetected`: `true` when current audio frames pass all gate conditions
 - `audioDetectedSeconds`: seconds since `audioDetected` last changed
 - `audioReason`: array of open-audio reasons. When the overall gate is open this contains `"dcs"`, `"ctcss"`, and `"rms"`; when the overall gate is closed this is an empty array
+- `inputBytesPerSecond`: measured throughput of the raw input source in bytes per second, sampled before any de-jitter buffering, gating, gain, or silence padding
 
 ## Example sequence
 
@@ -188,8 +190,112 @@ Ungated CTCSS decode:
 {"event":"status","streamName":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingEnabled":true,"recordingsPath":"/home/user/recordings","pid":12345,"apiPort":4040,"timestamp":1710938400789,"dcsGateEnabled":false,"dcs":null,"dcsPolarity":null,"dcsGate":"open","ctcssGateEnabled":false,"ctcss":"100.0","ctcssGate":"open","rmsGate":"open","rmsDb":-17.1,"outputDb":-17.1,"gate":"open","gateReason":"none","gateSeconds":0.500,"audioDetected":true,"audioDetectedSeconds":0.500,"audioReason":["dcs","ctcss","rms"]}
 ```
 
+## Commands
+
+Clients can send JSON command messages to change recorder settings while `radio-pipe` is running. Each command is a JSON object with at minimum a `command` field. Successful commands echo their applied value back as a `commandResponse` event broadcast to **all** connected clients.
+
+General request shape:
+
+```json
+{"command":"<commandName>","value":<value>}
+```
+
+General response shape:
+
+```json
+{"event":"commandResponse","command":"<commandName>","value":<applied value>,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+If the command fails (unknown command, missing/invalid field, out-of-range value), the response replaces `value` with an `error` field describing the problem:
+
+```json
+{"event":"commandResponse","command":"setGain","error":"setGain requires a numeric \"value\" field","pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+Messages that are not valid JSON, or that omit `command`, are silently ignored.
+
+### Command Summary
+
+- `setAutoGain`: enable/disable automatic post-gate gain (`value` boolean)
+- `setVoiceFilter`: enable/disable post-gate voice band-pass filter (`value` boolean)
+- `setDeemphasis`: enable/disable FM de-emphasis filter (`value` boolean, optional `tau` in µs)
+- `setGain`: set fixed post-gate gain in dB (`value` number, range -60..+60)
+
+### setAutoGain
+
+Request:
+
+```json
+{"command":"setAutoGain","value":true}
+```
+
+Response:
+
+```json
+{"event":"commandResponse","command":"setAutoGain","value":true,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+### setVoiceFilter
+
+Request:
+
+```json
+{"command":"setVoiceFilter","value":true}
+```
+
+Response:
+
+```json
+{"event":"commandResponse","command":"setVoiceFilter","value":true,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+### setDeemphasis
+
+Enable or disable the FM de-emphasis filter. The optional `tau` field overrides the de-emphasis time constant (in microseconds, must satisfy `0 < tau < 1000`); when omitted, the value supplied via `--deemphasis` at startup (default 75 µs) is used.
+
+Request (no tau override):
+
+```json
+{"command":"setDeemphasis","value":true}
+```
+
+Response:
+
+```json
+{"event":"commandResponse","command":"setDeemphasis","value":true,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+Request (with tau override, e.g. 50 µs for Europe/Asia):
+
+```json
+{"command":"setDeemphasis","value":true,"tau":50}
+```
+
+Response (the applied tau in µs is echoed back):
+
+```json
+{"event":"commandResponse","command":"setDeemphasis","value":true,"tau":50.0,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
+### setGain
+
+Set the fixed post-gate gain in dB. `value` must be a finite number between -60 and +60.
+
+Request:
+
+```json
+{"command":"setGain","value":-3.5}
+```
+
+Response:
+
+```json
+{"event":"commandResponse","command":"setGain","value":-3.5,"pid":12345,"apiPort":4040,"timestamp":1710938401234}
+```
+
 ## Notes
 
 - Multiple clients can connect and all receive the same event stream.
-- The server accepts incoming messages but currently ignores them.
+- `commandResponse` events are broadcast to all connected clients, not only the sender.
+- Messages that are not valid JSON, or that lack a `command` field, are silently ignored.
 - If `--api-websocket` is not set, no WebSocket server is started and no API events are published.
