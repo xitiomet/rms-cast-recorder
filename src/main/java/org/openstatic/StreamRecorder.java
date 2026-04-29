@@ -46,6 +46,8 @@ public class StreamRecorder {
     private static final long STDOUT_READ_POLL_MILLIS = 20L;
     private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
     private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
+    private static final double INPUT_BACKLOG_TRIM_TRIGGER_MULTIPLIER = 4.0;
+    private static final double INPUT_BACKLOG_TRIM_TARGET_MULTIPLIER = 1.5;
     private static final long PIPE_RESTART_BACKOFF_MILLIS = 10000L;
     private static final double AUTO_GAIN_TARGET_DB = -12.0;
     private static final double AUTO_GAIN_MAX_DB = 30.0;
@@ -853,6 +855,7 @@ public class StreamRecorder {
         }
         ArrayDeque<byte[]> inputDejitterBuffer = new ArrayDeque<>();
         long inputDejitterBufferedBytes = 0L;
+        long lastBacklogTrimLogMillis = 0L;
         boolean inputDejitterPrimed = (inputDejitterTargetBytes <= 0L);
         boolean inputEndOfStream = false;
 
@@ -899,97 +902,408 @@ public class StreamRecorder {
         readerThread.start();
 
         try {
-            while (running) {
-            StreamReadResult readResult;
-            try {
-                if (inputEndOfStream) {
-                    readResult = readQueue.poll();
-                } else {
-                    readResult = readQueue.poll(STDOUT_READ_POLL_MILLIS, TimeUnit.MILLISECONDS);
-                }
-            } catch (InterruptedException interruptedException) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-
-            if (readResult != null) {
-                if (readResult.error != null) {
-                    throw new IOException("Audio stream read failed", readResult.error);
-                }
-                if (readResult.endOfStream) {
-                    inputEndOfStream = true;
-                } else if (readResult.data != null && readResult.length > 0) {
-                    inputDejitterBuffer.addLast(readResult.data);
-                    inputDejitterBufferedBytes += readResult.length;
-                }
-            }
-
-            while (!inputEndOfStream && (readResult = readQueue.poll()) != null) {
-                if (readResult.error != null) {
-                    throw new IOException("Audio stream read failed", readResult.error);
-                }
-                if (readResult.endOfStream) {
-                    inputEndOfStream = true;
+            while (running) 
+            {
+                StreamReadResult readResult;
+                try {
+                    if (inputEndOfStream) {
+                        readResult = readQueue.poll();
+                    } else {
+                        readResult = readQueue.poll(STDOUT_READ_POLL_MILLIS, TimeUnit.MILLISECONDS);
+                    }
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
                     break;
                 }
-                if (readResult.data != null && readResult.length > 0) {
-                    inputDejitterBuffer.addLast(readResult.data);
-                    inputDejitterBufferedBytes += readResult.length;
-                }
-            }
 
-            if (!inputDejitterPrimed && (inputDejitterBufferedBytes >= inputDejitterTargetBytes
-                    || (inputEndOfStream && inputDejitterBufferedBytes > 0))) {
-                inputDejitterPrimed = true;
-            }
-
-            boolean noAudioData = true;
-            byte[] currentBuffer = null;
-            int n = 0;
-            if (inputDejitterPrimed && !inputDejitterBuffer.isEmpty()) {
-                currentBuffer = inputDejitterBuffer.removeFirst();
-                n = currentBuffer.length;
-                inputDejitterBufferedBytes -= n;
-                noAudioData = false;
-            }
-
-            if (noAudioData) {
-                if (inputEndOfStream) {
-                    break;
-                }
-                boolean useStallPadding = (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode)
-                        || (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode);
-                if (useStallPadding) {
-                    int padBytes = padFramesPerTick * frameSize;
-                    byte[] padSilence = new byte[padBytes];
-                    if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
-                        stdoutPadBuffer.addLast(padSilence);
-                        drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
+                if (readResult != null) {
+                    if (readResult.error != null) {
+                        throw new IOException("Audio stream read failed", readResult.error);
                     }
-                    if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
-                        pipePadBuffer.addLast(padSilence);
-                        drainPipePadBuffer(pipePadBuffer, padBytes, processingFormat, pipeSessions);
+                    if (readResult.endOfStream) {
+                        inputEndOfStream = true;
+                    } else if (readResult.data != null && readResult.length > 0) {
+                        inputDejitterBuffer.addLast(readResult.data);
+                        inputDejitterBufferedBytes += readResult.length;
                     }
+                }
 
-                    if (activelyRecording) {
-                        chunk.write(padSilence, 0, padBytes);
-                        recordedFrames += padFramesPerTick;
-                        if (deviceOutputSession != null) {
-                            writeDeviceOutput(deviceOutputSession, padSilence, padBytes, processingFormat);
+                while (!inputEndOfStream && (readResult = readQueue.poll()) != null) {
+                    if (readResult.error != null) {
+                        throw new IOException("Audio stream read failed", readResult.error);
+                    }
+                    if (readResult.endOfStream) {
+                        inputEndOfStream = true;
+                        break;
+                    }
+                    if (readResult.data != null && readResult.length > 0) {
+                        inputDejitterBuffer.addLast(readResult.data);
+                        inputDejitterBufferedBytes += readResult.length;
+                    }
+                }
+
+                    if (inputDejitterTargetBytes > 0L && inputDejitterBufferedBytes > 0L) {
+                        long trimTriggerBytes = Math.max(ioChunkBytes,
+                            (long) Math.ceil(inputDejitterTargetBytes * INPUT_BACKLOG_TRIM_TRIGGER_MULTIPLIER));
+                        long trimTargetBytes = Math.max(ioChunkBytes,
+                            (long) Math.ceil(inputDejitterTargetBytes * INPUT_BACKLOG_TRIM_TARGET_MULTIPLIER));
+
+                        if (inputDejitterBufferedBytes > trimTriggerBytes) {
+                            BacklogTrimResult trimResult = trimSilenceFromBacklog(
+                                inputDejitterBuffer,
+                                inputDejitterBufferedBytes,
+                                trimTargetBytes,
+                                processingFormat);
+                            inputDejitterBufferedBytes = trimResult.bufferedBytes;
+
+                            long nowMillis = System.currentTimeMillis();
+                            if (trimResult.trimmedChunks > 0 && nowMillis - lastBacklogTrimLogMillis >= 1000L) {
+                            lastBacklogTrimLogMillis = nowMillis;
+                            long trimmedMillis = bytesToMillis(trimResult.trimmedBytes, frameRate, frameSize);
+                            long bufferedMillis = bytesToMillis(inputDejitterBufferedBytes, frameRate, frameSize);
+                            log("INPUT", ANSI_YELLOW,
+                                "Backlog catch-up dropped " + trimResult.trimmedChunks
+                                    + " silent chunk(s) (" + trimmedMillis + " ms), buffer now "
+                                    + bufferedMillis + " ms.");
+                            }
                         }
                     }
 
-                    silentFrames += padFramesPerTick;
+                if (!inputDejitterPrimed && (inputDejitterBufferedBytes >= inputDejitterTargetBytes
+                        || (inputEndOfStream && inputDejitterBufferedBytes > 0))) {
+                    inputDejitterPrimed = true;
+                }
+
+                boolean noAudioData = true;
+                byte[] currentBuffer = null;
+                int n = 0;
+                if (inputDejitterPrimed && !inputDejitterBuffer.isEmpty()) {
+                    currentBuffer = inputDejitterBuffer.removeFirst();
+                    n = currentBuffer.length;
+                    inputDejitterBufferedBytes -= n;
+                    noAudioData = false;
+                }
+
+                if (noAudioData) {
+                    if (inputEndOfStream) {
+                        break;
+                    }
+                    boolean useStallPadding = (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode)
+                            || (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode);
+                    if (useStallPadding) {
+                        int padBytes = padFramesPerTick * frameSize;
+                        byte[] padSilence = new byte[padBytes];
+                        if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
+                            stdoutPadBuffer.addLast(padSilence);
+                            drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
+                        }
+                        if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
+                            pipePadBuffer.addLast(padSilence);
+                            drainPipePadBuffer(pipePadBuffer, padBytes, processingFormat, pipeSessions);
+                        }
+
+                        if (activelyRecording) {
+                            chunk.write(padSilence, 0, padBytes);
+                            recordedFrames += padFramesPerTick;
+                            if (deviceOutputSession != null) {
+                                writeDeviceOutput(deviceOutputSession, padSilence, padBytes, processingFormat);
+                            }
+                        }
+
+                        silentFrames += padFramesPerTick;
+                        if (silentFrames >= framesForSilence && chunk.size() > 0) {
+                            if (canWriteRecordings()) {
+                                log("SILENCE", ANSI_YELLOW,
+                                    String.format("Silence reached after %.1f s, closing clip.",
+                                        recordedFrames / frameRate));
+                            }
+                            publishEvent("silenceDetected");
+                            byte[] clipAudio = chunk.toByteArray();
+                            double soundSeconds = soundFrames / frameRate;
+                            if (soundSeconds > 1.0) {
+                                if (canWriteRecordings()) {
+                                    writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
+                                }
+                                if (this.stdoutEnabled && !this.stdoutRawMode) {
+                                    writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
+                                }
+                                if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                                    writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
+                                }
+                            } else {
+                                if (canWriteRecordings()) {
+                                    log("RECORD", ANSI_YELLOW,
+                                            String.format("Discarding clip with only %.1f s of sound.",
+                                                    soundSeconds));
+                                }
+                            }
+                            chunk.reset();
+                            activelyRecording = false;
+                            recordedFrames = 0;
+                            soundFrames = 0;
+                            silentFrames = 0;
+                        }
+                    }
+                    statusOutputDb = -100.0;
+                    long idleNowNanos = System.nanoTime();
+                    nextStatusEmitNanos = publishStatusIfDue(
+                            idleNowNanos,
+                            nextStatusEmitNanos,
+                        dcsGateEnabled,
+                            statusDcsGateOpen,
+                            statusDcsGateSinceNanos,
+                        ctcssGateEnabled,
+                            statusCtcssGateOpen,
+                            statusCtcssGateSinceNanos,
+                            statusRmsGateOpen,
+                            statusRmsGateSinceNanos,
+                            statusRmsDb,
+                            statusOutputDb,
+                            statusGateOpen,
+                            statusGateReason,
+                            statusGateSinceNanos,
+                            statusAudioDetected,
+                            statusAudioDetectedSinceNanos,
+                            statusDetectedDcsLabel,
+                            statusDetectedDcsPolarity,
+                            statusDcsConfidence,
+                            statusDetectedCtcssLabel,
+                            this.streamUrl,
+                            this.stdinMode,
+                            processingFormat,
+                            this.baseDir);
+                    continue;
+                }
+
+                long nowNanos = System.nanoTime();
+
+                dcsStatusDetector.consume(currentBuffer, n, processingFormat);
+                Integer detectedDcsCode = dcsStatusDetector.getDetectedCode();
+                statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
+                statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
+                statusDcsConfidence = dcsStatusDetector.getConfidenceScore();
+
+                if (!dcsGateEnabled) {
+                    if (statusDetectedDcsLabel != null) {
+                        if (!sameNullableText(statusDetectedDcsLabel, lastUngatedDcsLabel)
+                                || !sameNullableText(statusDetectedDcsPolarity, lastUngatedDcsPolarity)) {
+                            log("DCS", ANSI_CYAN,
+                                    "DCS " + statusDetectedDcsLabel
+                                            + " detected (" + statusDetectedDcsPolarity
+                                            + "), gate not configured.");
+                        }
+                    } else if (lastUngatedDcsLabel != null) {
+                        log("DCS", ANSI_YELLOW,
+                                "DCS " + lastUngatedDcsLabel + " no longer detected.");
+                    }
+
+                    lastUngatedDcsLabel = statusDetectedDcsLabel;
+                    lastUngatedDcsPolarity = statusDetectedDcsPolarity;
+                }
+
+                boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, processingFormat);
+                if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
+                    long holdUntil = nowNanos + gateHoldNanos;
+                    dcsGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
+                }
+                boolean dcsMatch = dcsRawMatch;
+                if (!dcsMatch && dcsGateEnabled && gateHoldNanos > 0L && nowNanos <= dcsGateHoldUntilNanos) {
+                    dcsMatch = true;
+                }
+
+                ctcssStatusDetector.consume(currentBuffer, n, processingFormat);
+                Double detectedCtcssTone = ctcssStatusDetector.getDetectedToneHz();
+                statusDetectedCtcssLabel = (detectedCtcssTone == null) ? null : formatCtcssTone(detectedCtcssTone.doubleValue());
+
+                boolean ctcssRawMatch = !ctcssGateEnabled || ctcssGateDetector.consume(currentBuffer, n, processingFormat);
+                if (ctcssGateEnabled && ctcssRawMatch && gateHoldNanos > 0L) {
+                    long holdUntil = nowNanos + gateHoldNanos;
+                    ctcssGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
+                }
+                boolean ctcssMatch = ctcssRawMatch;
+                if (!ctcssMatch && ctcssGateEnabled && gateHoldNanos > 0L && nowNanos <= ctcssGateHoldUntilNanos) {
+                    ctcssMatch = true;
+                }
+                if (dcsGateEnabled && dcsMatch != dcsGateOpen) {
+                    dcsGateOpen = dcsMatch;
+                    if (dcsGateOpen) {
+                        log("DCS", ANSI_GREEN,
+                                "DCS " + this.requiredDcsLabel + " detected ("
+                                        + dcsGateDetector.getPolarityLabel() + "), gate open.");
+                            publishEvent("dcsDetected",
+                                "dcs", this.requiredDcsLabel,
+                                "polarity", dcsGateDetector.getPolarityLabel());
+                    } else {
+                        log("DCS", ANSI_YELLOW,
+                                "DCS " + this.requiredDcsLabel + " no longer detected, gate closed.");
+                        publishEvent("dcsGone",
+                                "dcs", this.requiredDcsLabel,
+                                "polarity", dcsGateDetector.getPolarityLabel());
+                    }
+                }
+                if (ctcssGateEnabled && ctcssMatch != ctcssGateOpen) {
+                    ctcssGateOpen = ctcssMatch;
+                    if (ctcssGateOpen) {
+                        log("CTCSS", ANSI_GREEN,
+                                "CTCSS " + this.requiredCtcssLabel + " detected, gate open.");
+                            publishEvent("ctcssDetected",
+                                "ctcss", this.requiredCtcssLabel);
+                    } else {
+                        log("CTCSS", ANSI_YELLOW,
+                                "CTCSS " + this.requiredCtcssLabel + " no longer detected, gate closed.");
+                        publishEvent("ctcssGone",
+                                "ctcss", this.requiredCtcssLabel);
+                    }
+                }
+
+                if (statusDcsGateOpen != dcsMatch) {
+                    statusDcsGateOpen = dcsMatch;
+                    statusDcsGateSinceNanos = nowNanos;
+                }
+                if (statusCtcssGateOpen != ctcssMatch) {
+                    statusCtcssGateOpen = ctcssMatch;
+                    statusCtcssGateSinceNanos = nowNanos;
+                }
+                RmsGate.Result rmsGateResult = this.rmsGate.evaluate(currentBuffer, n, processingFormat);
+                double currentRmsDb = rmsGateResult.getRmsDb();
+                boolean rmsGateOpen = rmsGateResult.isOpen();
+                statusRmsDb = currentRmsDb;
+                if (statusRmsGateOpen != rmsGateOpen) {
+                    statusRmsGateOpen = rmsGateOpen;
+                    statusRmsGateSinceNanos = nowNanos;
+                }
+
+                String currentGateBlockReason = determineGateBlockReason(dcsMatch, ctcssMatch, rmsGateOpen);
+                boolean currentGateOpen = (currentGateBlockReason == null);
+
+                if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
+                    statusGateSinceNanos = nowNanos;
+                }
+                statusGateOpen = currentGateOpen;
+                statusGateReason = currentGateBlockReason;
+
+                boolean gateAllowsAudio = dcsMatch && ctcssMatch && rmsGateOpen;
+                boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
+                byte[] frameForOutput = currentBuffer;
+                if (includeFrameInClip && !gateAllowsAudio && activelyRecording) {
+                    frameForOutput = new byte[n];
+                }
+                if (includeFrameInClip) {
+                    double gainReferenceRmsDb = currentRmsDb;
+                    if (gateAllowsAudio && deemphasisFilter != null) {
+                        deemphasisFilter.processInPlace(currentBuffer, n, processingFormat);
+                    }
+                    if (gateAllowsAudio && voiceBandPassFilter != null) {
+                        voiceBandPassFilter.processInPlace(currentBuffer, n, processingFormat);
+                        gainReferenceRmsDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
+                    }
+                    double frameGainDb = this.outputGainDb;
+                    if (this.autoGainEnabled && gateAllowsAudio) {
+                        double neededAutoGainDb = AUTO_GAIN_TARGET_DB - gainReferenceRmsDb;
+                        double targetAutoGainDb = Math.max(0.0, Math.min(AUTO_GAIN_MAX_DB, neededAutoGainDb));
+                        double bufferDurationSec = (n / (double) frameSize) / frameRate;
+                        double delta = targetAutoGainDb - this.smoothedAutoGainDb;
+                        if (delta > 0.0) {
+                            this.smoothedAutoGainDb += Math.min(delta, AUTO_GAIN_ATTACK_DB_PER_SEC * bufferDurationSec);
+                        } else {
+                            this.smoothedAutoGainDb += Math.max(delta, -AUTO_GAIN_RELEASE_DB_PER_SEC * bufferDurationSec);
+                        }
+                        frameGainDb += this.smoothedAutoGainDb;
+                    }
+                    applyGainInPlace(currentBuffer, n, processingFormat, frameGainDb);
+                }
+
+                if (gateAllowsAudio) {
+                    statusOutputDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
+                } else {
+                    statusOutputDb = -100.0;
+                }
+                if (statusAudioDetected != gateAllowsAudio) {
+                    statusAudioDetected = gateAllowsAudio;
+                    statusAudioDetectedSinceNanos = nowNanos;
+                }
+                nextStatusEmitNanos = publishStatusIfDue(
+                        nowNanos,
+                        nextStatusEmitNanos,
+                        dcsGateEnabled,
+                        statusDcsGateOpen,
+                        statusDcsGateSinceNanos,
+                        ctcssGateEnabled,
+                        statusCtcssGateOpen,
+                        statusCtcssGateSinceNanos,
+                        statusRmsGateOpen,
+                        statusRmsGateSinceNanos,
+                        statusRmsDb,
+                        statusOutputDb,
+                        statusGateOpen,
+                        statusGateReason,
+                        statusGateSinceNanos,
+                        statusAudioDetected,
+                        statusAudioDetectedSinceNanos,
+                        statusDetectedDcsLabel,
+                        statusDetectedDcsPolarity,
+                        statusDcsConfidence,
+                        statusDetectedCtcssLabel,
+                        this.streamUrl,
+                        this.stdinMode,
+                        processingFormat,
+                        this.baseDir);
+                if (this.stdoutEnabled && this.stdoutRawMode) {
+                    if (this.stdoutPadMode) {
+                        byte[] stdoutFrame = includeFrameInClip
+                                ? Arrays.copyOf(frameForOutput, n)
+                                : new byte[n];
+                        stdoutPadBuffer.addLast(stdoutFrame);
+                        drainStdoutPadBuffer(stdoutPadBuffer, n, processingFormat);
+                    } else if (includeFrameInClip) {
+                        writeStdoutRaw(frameForOutput, n, processingFormat);
+                    }
+                }
+                if (!pipeSessions.isEmpty() && this.pipeRawMode) {
+                    if (this.pipeRawPadMode) {
+                        byte[] pipeFrame = includeFrameInClip
+                                ? Arrays.copyOf(frameForOutput, n)
+                                : new byte[n];
+                        pipePadBuffer.addLast(pipeFrame);
+                        drainPipePadBuffer(pipePadBuffer, n, processingFormat, pipeSessions);
+                    } else if (includeFrameInClip) {
+                        writePipeRaw(pipeSessions, frameForOutput, n, processingFormat);
+                    }
+                }
+                if (deviceOutputSession != null && includeFrameInClip) {
+                    writeDeviceOutput(deviceOutputSession, frameForOutput, n, processingFormat);
+                }
+
+                if (gateAllowsAudio) {
+                    if (chunk.size() == 0) {
+                        chunkStartTime = System.currentTimeMillis();
+                        if (canWriteRecordings()) {
+                            log("RECORD", ANSI_GREEN,
+                                    "Audio detected, starting clip for stream " + streamLabel + ".");
+                        }
+                        publishEvent("audioDetected");
+                    }
+                    chunk.write(frameForOutput, 0, n);
+                    recordedFrames += n / frameSize;
+                    soundFrames += n / frameSize;
+                    silentFrames = 0;
+                    activelyRecording = true;
+                } else {
+                    if (activelyRecording) {
+                        chunk.write(frameForOutput, 0, n);
+                        recordedFrames += n / frameSize;
+                    }
+                    silentFrames += n / frameSize;
                     if (silentFrames >= framesForSilence && chunk.size() > 0) {
                         if (canWriteRecordings()) {
-                            log("SILENCE", ANSI_YELLOW,
-                                String.format("Silence reached after %.1f s, closing clip.",
-                                    recordedFrames / frameRate));
+                        log("SILENCE", ANSI_YELLOW,
+                            String.format("Silence reached after %.1f s, closing clip.",
+                                recordedFrames / frameRate));
                         }
                         publishEvent("silenceDetected");
                         byte[] clipAudio = chunk.toByteArray();
                         double soundSeconds = soundFrames / frameRate;
-                        if (soundSeconds > 1.0) {
+                        if (soundSeconds > 1.0) { // only keep clips that have at least 1 second of sound
                             if (canWriteRecordings()) {
                                 writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
                             }
@@ -1013,291 +1327,9 @@ public class StreamRecorder {
                         silentFrames = 0;
                     }
                 }
-                statusOutputDb = -100.0;
-                long idleNowNanos = System.nanoTime();
-                nextStatusEmitNanos = publishStatusIfDue(
-                        idleNowNanos,
-                        nextStatusEmitNanos,
-                    dcsGateEnabled,
-                        statusDcsGateOpen,
-                        statusDcsGateSinceNanos,
-                    ctcssGateEnabled,
-                        statusCtcssGateOpen,
-                        statusCtcssGateSinceNanos,
-                        statusRmsGateOpen,
-                        statusRmsGateSinceNanos,
-                        statusRmsDb,
-                        statusOutputDb,
-                        statusGateOpen,
-                        statusGateReason,
-                        statusGateSinceNanos,
-                        statusAudioDetected,
-                        statusAudioDetectedSinceNanos,
-                        statusDetectedDcsLabel,
-                        statusDetectedDcsPolarity,
-                        statusDcsConfidence,
-                        statusDetectedCtcssLabel,
-                        this.streamUrl,
-                        this.stdinMode,
-                        processingFormat,
-                        this.baseDir);
-                continue;
             }
-
-            long nowNanos = System.nanoTime();
-
-            dcsStatusDetector.consume(currentBuffer, n, processingFormat);
-            Integer detectedDcsCode = dcsStatusDetector.getDetectedCode();
-            statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
-            statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
-            statusDcsConfidence = dcsStatusDetector.getConfidenceScore();
-
-            if (!dcsGateEnabled) {
-                if (statusDetectedDcsLabel != null) {
-                    if (!sameNullableText(statusDetectedDcsLabel, lastUngatedDcsLabel)
-                            || !sameNullableText(statusDetectedDcsPolarity, lastUngatedDcsPolarity)) {
-                        log("DCS", ANSI_CYAN,
-                                "DCS " + statusDetectedDcsLabel
-                                        + " detected (" + statusDetectedDcsPolarity
-                                        + "), gate not configured.");
-                    }
-                } else if (lastUngatedDcsLabel != null) {
-                    log("DCS", ANSI_YELLOW,
-                            "DCS " + lastUngatedDcsLabel + " no longer detected.");
-                }
-
-                lastUngatedDcsLabel = statusDetectedDcsLabel;
-                lastUngatedDcsPolarity = statusDetectedDcsPolarity;
-            }
-
-            boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, processingFormat);
-            if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
-                long holdUntil = nowNanos + gateHoldNanos;
-                dcsGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
-            }
-            boolean dcsMatch = dcsRawMatch;
-            if (!dcsMatch && dcsGateEnabled && gateHoldNanos > 0L && nowNanos <= dcsGateHoldUntilNanos) {
-                dcsMatch = true;
-            }
-
-            ctcssStatusDetector.consume(currentBuffer, n, processingFormat);
-            Double detectedCtcssTone = ctcssStatusDetector.getDetectedToneHz();
-            statusDetectedCtcssLabel = (detectedCtcssTone == null) ? null : formatCtcssTone(detectedCtcssTone.doubleValue());
-
-            boolean ctcssRawMatch = !ctcssGateEnabled || ctcssGateDetector.consume(currentBuffer, n, processingFormat);
-            if (ctcssGateEnabled && ctcssRawMatch && gateHoldNanos > 0L) {
-                long holdUntil = nowNanos + gateHoldNanos;
-                ctcssGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
-            }
-            boolean ctcssMatch = ctcssRawMatch;
-            if (!ctcssMatch && ctcssGateEnabled && gateHoldNanos > 0L && nowNanos <= ctcssGateHoldUntilNanos) {
-                ctcssMatch = true;
-            }
-            if (dcsGateEnabled && dcsMatch != dcsGateOpen) {
-                dcsGateOpen = dcsMatch;
-                if (dcsGateOpen) {
-                    log("DCS", ANSI_GREEN,
-                            "DCS " + this.requiredDcsLabel + " detected ("
-                                    + dcsGateDetector.getPolarityLabel() + "), gate open.");
-                        publishEvent("dcsDetected",
-                            "dcs", this.requiredDcsLabel,
-                            "polarity", dcsGateDetector.getPolarityLabel());
-                } else {
-                    log("DCS", ANSI_YELLOW,
-                            "DCS " + this.requiredDcsLabel + " no longer detected, gate closed.");
-                    publishEvent("dcsGone",
-                            "dcs", this.requiredDcsLabel,
-                            "polarity", dcsGateDetector.getPolarityLabel());
-                }
-            }
-            if (ctcssGateEnabled && ctcssMatch != ctcssGateOpen) {
-                ctcssGateOpen = ctcssMatch;
-                if (ctcssGateOpen) {
-                    log("CTCSS", ANSI_GREEN,
-                            "CTCSS " + this.requiredCtcssLabel + " detected, gate open.");
-                        publishEvent("ctcssDetected",
-                            "ctcss", this.requiredCtcssLabel);
-                } else {
-                    log("CTCSS", ANSI_YELLOW,
-                            "CTCSS " + this.requiredCtcssLabel + " no longer detected, gate closed.");
-                    publishEvent("ctcssGone",
-                            "ctcss", this.requiredCtcssLabel);
-                }
-            }
-
-            if (statusDcsGateOpen != dcsMatch) {
-                statusDcsGateOpen = dcsMatch;
-                statusDcsGateSinceNanos = nowNanos;
-            }
-            if (statusCtcssGateOpen != ctcssMatch) {
-                statusCtcssGateOpen = ctcssMatch;
-                statusCtcssGateSinceNanos = nowNanos;
-            }
-            RmsGate.Result rmsGateResult = this.rmsGate.evaluate(currentBuffer, n, processingFormat);
-            double currentRmsDb = rmsGateResult.getRmsDb();
-            boolean rmsGateOpen = rmsGateResult.isOpen();
-            statusRmsDb = currentRmsDb;
-            if (statusRmsGateOpen != rmsGateOpen) {
-                statusRmsGateOpen = rmsGateOpen;
-                statusRmsGateSinceNanos = nowNanos;
-            }
-
-            String currentGateBlockReason = determineGateBlockReason(dcsMatch, ctcssMatch, rmsGateOpen);
-            boolean currentGateOpen = (currentGateBlockReason == null);
-
-            if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
-                statusGateSinceNanos = nowNanos;
-            }
-            statusGateOpen = currentGateOpen;
-            statusGateReason = currentGateBlockReason;
-
-            boolean gateAllowsAudio = dcsMatch && ctcssMatch && rmsGateOpen;
-            boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
-            byte[] frameForOutput = currentBuffer;
-            if (includeFrameInClip && !gateAllowsAudio && activelyRecording) {
-                frameForOutput = new byte[n];
-            }
-            if (includeFrameInClip) {
-                double gainReferenceRmsDb = currentRmsDb;
-                if (gateAllowsAudio && deemphasisFilter != null) {
-                    deemphasisFilter.processInPlace(currentBuffer, n, processingFormat);
-                }
-                if (gateAllowsAudio && voiceBandPassFilter != null) {
-                    voiceBandPassFilter.processInPlace(currentBuffer, n, processingFormat);
-                    gainReferenceRmsDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
-                }
-                double frameGainDb = this.outputGainDb;
-                if (this.autoGainEnabled && gateAllowsAudio) {
-                    double neededAutoGainDb = AUTO_GAIN_TARGET_DB - gainReferenceRmsDb;
-                    double targetAutoGainDb = Math.max(0.0, Math.min(AUTO_GAIN_MAX_DB, neededAutoGainDb));
-                    double bufferDurationSec = (n / (double) frameSize) / frameRate;
-                    double delta = targetAutoGainDb - this.smoothedAutoGainDb;
-                    if (delta > 0.0) {
-                        this.smoothedAutoGainDb += Math.min(delta, AUTO_GAIN_ATTACK_DB_PER_SEC * bufferDurationSec);
-                    } else {
-                        this.smoothedAutoGainDb += Math.max(delta, -AUTO_GAIN_RELEASE_DB_PER_SEC * bufferDurationSec);
-                    }
-                    frameGainDb += this.smoothedAutoGainDb;
-                }
-                applyGainInPlace(currentBuffer, n, processingFormat, frameGainDb);
-            }
-
-            if (gateAllowsAudio) {
-                statusOutputDb = this.rmsGate.evaluate(currentBuffer, n, processingFormat).getRmsDb();
-            } else {
-                statusOutputDb = -100.0;
-            }
-            if (statusAudioDetected != gateAllowsAudio) {
-                statusAudioDetected = gateAllowsAudio;
-                statusAudioDetectedSinceNanos = nowNanos;
-            }
-            nextStatusEmitNanos = publishStatusIfDue(
-                    nowNanos,
-                    nextStatusEmitNanos,
-                    dcsGateEnabled,
-                    statusDcsGateOpen,
-                    statusDcsGateSinceNanos,
-                    ctcssGateEnabled,
-                    statusCtcssGateOpen,
-                    statusCtcssGateSinceNanos,
-                    statusRmsGateOpen,
-                    statusRmsGateSinceNanos,
-                    statusRmsDb,
-                    statusOutputDb,
-                    statusGateOpen,
-                    statusGateReason,
-                    statusGateSinceNanos,
-                    statusAudioDetected,
-                    statusAudioDetectedSinceNanos,
-                    statusDetectedDcsLabel,
-                    statusDetectedDcsPolarity,
-                    statusDcsConfidence,
-                    statusDetectedCtcssLabel,
-                    this.streamUrl,
-                    this.stdinMode,
-                    processingFormat,
-                    this.baseDir);
-            if (this.stdoutEnabled && this.stdoutRawMode) {
-                if (this.stdoutPadMode) {
-                    byte[] stdoutFrame = includeFrameInClip
-                            ? Arrays.copyOf(frameForOutput, n)
-                            : new byte[n];
-                    stdoutPadBuffer.addLast(stdoutFrame);
-                    drainStdoutPadBuffer(stdoutPadBuffer, n, processingFormat);
-                } else if (includeFrameInClip) {
-                    writeStdoutRaw(frameForOutput, n, processingFormat);
-                }
-            }
-            if (!pipeSessions.isEmpty() && this.pipeRawMode) {
-                if (this.pipeRawPadMode) {
-                    byte[] pipeFrame = includeFrameInClip
-                            ? Arrays.copyOf(frameForOutput, n)
-                            : new byte[n];
-                    pipePadBuffer.addLast(pipeFrame);
-                    drainPipePadBuffer(pipePadBuffer, n, processingFormat, pipeSessions);
-                } else if (includeFrameInClip) {
-                    writePipeRaw(pipeSessions, frameForOutput, n, processingFormat);
-                }
-            }
-            if (deviceOutputSession != null && includeFrameInClip) {
-                writeDeviceOutput(deviceOutputSession, frameForOutput, n, processingFormat);
-            }
-
-            if (gateAllowsAudio) {
-                if (chunk.size() == 0) {
-                    chunkStartTime = System.currentTimeMillis();
-                    if (canWriteRecordings()) {
-                        log("RECORD", ANSI_GREEN,
-                                "Audio detected, starting clip for stream " + streamLabel + ".");
-                    }
-                    publishEvent("audioDetected");
-                }
-                chunk.write(frameForOutput, 0, n);
-                recordedFrames += n / frameSize;
-                soundFrames += n / frameSize;
-                silentFrames = 0;
-                activelyRecording = true;
-            } else {
-                if (activelyRecording) {
-                    chunk.write(frameForOutput, 0, n);
-                    recordedFrames += n / frameSize;
-                }
-                silentFrames += n / frameSize;
-                if (silentFrames >= framesForSilence && chunk.size() > 0) {
-                    if (canWriteRecordings()) {
-                    log("SILENCE", ANSI_YELLOW,
-                        String.format("Silence reached after %.1f s, closing clip.",
-                            recordedFrames / frameRate));
-                    }
-                    publishEvent("silenceDetected");
-                    byte[] clipAudio = chunk.toByteArray();
-                    double soundSeconds = soundFrames / frameRate;
-                    if (soundSeconds > 1.0) { // only keep clips that have at least 1 second of sound
-                        if (canWriteRecordings()) {
-                            writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
-                        }
-                        if (this.stdoutEnabled && !this.stdoutRawMode) {
-                            writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
-                        }
-                        if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
-                            writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
-                        }
-                    } else {
-                        if (canWriteRecordings()) {
-                            log("RECORD", ANSI_YELLOW,
-                                    String.format("Discarding clip with only %.1f s of sound.",
-                                            soundSeconds));
-                        }
-                    }
-                    chunk.reset();
-                    activelyRecording = false;
-                    recordedFrames = 0;
-                    soundFrames = 0;
-                    silentFrames = 0;
-                }
-            }
-        }
-            if (chunk.size() > 0) {
+            if (chunk.size() > 0) 
+            {
                 byte[] clipAudio = chunk.toByteArray();
                 double soundSeconds = soundFrames / frameRate;
                 if (soundSeconds > 1.0) {
@@ -2524,6 +2556,52 @@ public class StreamRecorder {
                 withEventMetadata(currentApiWebSocketServer, keyValuePairs));
     }
 
+    private BacklogTrimResult trimSilenceFromBacklog(ArrayDeque<byte[]> backlog,
+                                                     long bufferedBytes,
+                                                     long targetBytes,
+                                                     AudioFormat processingFormat) {
+        if (backlog.isEmpty() || bufferedBytes <= targetBytes) {
+            return BacklogTrimResult.empty(bufferedBytes);
+        }
+
+        ArrayDeque<byte[]> kept = new ArrayDeque<>(backlog.size());
+        long trimmedBytes = 0L;
+        int trimmedChunks = 0;
+        for (byte[] chunkBytes : backlog) {
+            if (chunkBytes == null || chunkBytes.length == 0) {
+                continue;
+            }
+
+            boolean shouldDrop = bufferedBytes > targetBytes && isSilentChunk(chunkBytes, processingFormat);
+            if (shouldDrop) {
+                trimmedBytes += chunkBytes.length;
+                trimmedChunks++;
+                bufferedBytes -= chunkBytes.length;
+            } else {
+                kept.addLast(chunkBytes);
+            }
+        }
+
+        backlog.clear();
+        backlog.addAll(kept);
+        return new BacklogTrimResult(bufferedBytes, trimmedBytes, trimmedChunks);
+    }
+
+    private boolean isSilentChunk(byte[] chunkBytes, AudioFormat processingFormat) {
+        if (chunkBytes == null || chunkBytes.length == 0) {
+            return true;
+        }
+        return !this.rmsGate.evaluate(chunkBytes, chunkBytes.length, processingFormat).isOpen();
+    }
+
+    private static long bytesToMillis(long bytes, float frameRate, int frameSize) {
+        if (bytes <= 0L || frameRate <= 0.0f || frameSize <= 0) {
+            return 0L;
+        }
+        double frames = bytes / (double) frameSize;
+        return Math.max(0L, Math.round((frames / frameRate) * 1000.0));
+    }
+
     private static Object[] withEventMetadata(ApiWebSocketServer apiServer, Object[] keyValuePairs) {
         Object[] basePairs = (keyValuePairs == null) ? new Object[0] : keyValuePairs;
         boolean hasPid = false;
@@ -2564,6 +2642,22 @@ public class StreamRecorder {
             mergedPairs[writeIndex++] = System.currentTimeMillis();
         }
         return mergedPairs;
+    }
+
+    private static final class BacklogTrimResult {
+        final long bufferedBytes;
+        final long trimmedBytes;
+        final int trimmedChunks;
+
+        private BacklogTrimResult(long bufferedBytes, long trimmedBytes, int trimmedChunks) {
+            this.bufferedBytes = bufferedBytes;
+            this.trimmedBytes = trimmedBytes;
+            this.trimmedChunks = trimmedChunks;
+        }
+
+        static BacklogTrimResult empty(long bufferedBytes) {
+            return new BacklogTrimResult(bufferedBytes, 0L, 0);
+        }
     }
 
     private void updateStreamLabel(HttpURLConnection conn) {
