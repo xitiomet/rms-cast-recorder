@@ -49,6 +49,7 @@ public class StreamRecorder {
     private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
     private static final double INPUT_BACKLOG_TRIM_TRIGGER_MULTIPLIER = 4.0;
     private static final double INPUT_BACKLOG_TRIM_TARGET_MULTIPLIER = 1.5;
+    private static final double INPUT_BACKLOG_HARDCAP_MULTIPLIER = 8.0;
     private static final long PIPE_RESTART_BACKOFF_MILLIS = 10000L;
     private static final double AUTO_GAIN_TARGET_DB = -12.0;
     private static final double AUTO_GAIN_MAX_DB = 30.0;
@@ -978,6 +979,9 @@ public class StreamRecorder {
                         long trimTargetBytes = Math.max(ioChunkBytes,
                             (long) Math.ceil(inputDejitterTargetBytes * INPUT_BACKLOG_TRIM_TARGET_MULTIPLIER));
 
+                        long hardCapBytes = Math.max(ioChunkBytes,
+                            (long) Math.ceil(inputDejitterTargetBytes * INPUT_BACKLOG_HARDCAP_MULTIPLIER));
+
                         if (inputDejitterBufferedBytes > trimTriggerBytes) {
                             BacklogTrimResult trimResult = trimSilenceFromBacklog(
                                 inputDejitterBuffer,
@@ -994,6 +998,25 @@ public class StreamRecorder {
                             log("INPUT", ANSI_YELLOW,
                                 "Backlog catch-up dropped " + trimResult.trimmedChunks
                                     + " silent chunk(s) (" + trimmedMillis + " ms), buffer now "
+                                    + bufferedMillis + " ms.");
+                            }
+                        }
+
+                        if (inputDejitterBufferedBytes > hardCapBytes) {
+                            BacklogTrimResult hardCapResult = trimOldestFromBacklog(
+                                inputDejitterBuffer,
+                                inputDejitterBufferedBytes,
+                                trimTargetBytes);
+                            inputDejitterBufferedBytes = hardCapResult.bufferedBytes;
+
+                            long nowMillis = System.currentTimeMillis();
+                            if (hardCapResult.trimmedChunks > 0 && nowMillis - lastBacklogTrimLogMillis >= 1000L) {
+                            lastBacklogTrimLogMillis = nowMillis;
+                            long trimmedMillis = bytesToMillis(hardCapResult.trimmedBytes, frameRate, frameSize);
+                            long bufferedMillis = bytesToMillis(inputDejitterBufferedBytes, frameRate, frameSize);
+                            log("INPUT", ANSI_RED,
+                                "Backlog hard-cap dropped " + hardCapResult.trimmedChunks
+                                    + " audio chunk(s) (" + trimmedMillis + " ms), buffer now "
                                     + bufferedMillis + " ms.");
                             }
                         }
@@ -1076,6 +1099,7 @@ public class StreamRecorder {
                     nextStatusEmitNanos = publishStatusIfDue(
                             idleNowNanos,
                             nextStatusEmitNanos,
+                            inputDejitterBufferedBytes,
                         dcsGateEnabled,
                             statusDcsGateOpen,
                             statusDcsGateSinceNanos,
@@ -1252,6 +1276,7 @@ public class StreamRecorder {
                 nextStatusEmitNanos = publishStatusIfDue(
                         nowNanos,
                         nextStatusEmitNanos,
+                        inputDejitterBufferedBytes,
                         dcsGateEnabled,
                         statusDcsGateOpen,
                         statusDcsGateSinceNanos,
@@ -2533,6 +2558,7 @@ public class StreamRecorder {
 
     private long publishStatusIfDue(long nowNanos,
                                     long nextStatusEmitNanos,
+                                    long inputBufferSizeBytes,
                                     boolean dcsGateEnabled,
                                     boolean dcsGateOpen,
                                     long dcsGateSinceNanos,
@@ -2623,7 +2649,8 @@ public class StreamRecorder {
                 "audioDetected", audioDetected,
                 "audioDetectedSeconds", audioDetectedSecondsValue,
                 "audioReason", audioReasonValue,
-                "inputBytesPerSecond", inputBytesPerSecond);
+                "inputBytesPerSecond", inputBytesPerSecond,
+                "inputBufferSizeBytes", inputBufferSizeBytes);
         return nowNanos + TimeUnit.MILLISECONDS.toNanos(250L);
     }
 
@@ -2693,6 +2720,26 @@ public class StreamRecorder {
 
         backlog.clear();
         backlog.addAll(kept);
+        return new BacklogTrimResult(bufferedBytes, trimmedBytes, trimmedChunks);
+    }
+
+    private BacklogTrimResult trimOldestFromBacklog(ArrayDeque<byte[]> backlog,
+                                                    long bufferedBytes,
+                                                    long targetBytes) {
+        if (backlog.isEmpty() || bufferedBytes <= targetBytes) {
+            return BacklogTrimResult.empty(bufferedBytes);
+        }
+
+        long trimmedBytes = 0L;
+        int trimmedChunks = 0;
+        while (bufferedBytes > targetBytes && !backlog.isEmpty()) {
+            byte[] oldest = backlog.pollFirst();
+            if (oldest != null && oldest.length > 0) {
+                trimmedBytes += oldest.length;
+                trimmedChunks++;
+                bufferedBytes -= oldest.length;
+            }
+        }
         return new BacklogTrimResult(bufferedBytes, trimmedBytes, trimmedChunks);
     }
 

@@ -255,6 +255,7 @@
                     -H:+ReportExceptionStackTraces
                     -H:+AllowDeprecatedBuilderClassesOnImageClasspath
                     -l:asound
+                    -R:MaxHeapSize=2048M
                 </buildArgs>
             </configuration>
        </plugin>
