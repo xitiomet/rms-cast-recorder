@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -103,6 +104,10 @@ public class StreamRecorder {
     private volatile String inputDeviceSelector;
     private volatile AudioFormat inputDeviceCaptureFormat;
     private volatile ApiWebSocketServer apiWebSocketServer;
+    private final AtomicLong inputBytesTotal = new AtomicLong();
+    private long lastInputBytesSampleTotal = 0L;
+    private long lastInputBytesSampleNanos = 0L;
+    private long inputBytesPerSecond = 0L;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
     private static final DateTimeFormatter LOG_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -882,6 +887,7 @@ public class StreamRecorder {
             try {
                 int n;
                 while (running && (n = din.read(readBuffer)) != -1) {
+                    inputBytesTotal.addAndGet(n);
                     byte[] copy = Arrays.copyOf(readBuffer, n);
                     readQueue.put(StreamReadResult.data(copy, n));
                 }
@@ -2526,6 +2532,23 @@ public class StreamRecorder {
             return nextStatusEmitNanos;
         }
 
+        long currentInputBytesTotal = inputBytesTotal.get();
+        if (lastInputBytesSampleNanos == 0L) {
+            lastInputBytesSampleNanos = nowNanos;
+            lastInputBytesSampleTotal = currentInputBytesTotal;
+        } else {
+            long elapsedNanos = nowNanos - lastInputBytesSampleNanos;
+            if (elapsedNanos >= TimeUnit.MILLISECONDS.toNanos(100L)) {
+                long deltaBytes = currentInputBytesTotal - lastInputBytesSampleTotal;
+                if (deltaBytes < 0L) {
+                    deltaBytes = 0L;
+                }
+                inputBytesPerSecond = Math.round(deltaBytes * 1_000_000_000.0 / elapsedNanos);
+                lastInputBytesSampleNanos = nowNanos;
+                lastInputBytesSampleTotal = currentInputBytesTotal;
+            }
+        }
+
         String gateReasonValue = gateOpen ? "none" : (gateReason == null ? "unknown" : gateReason);
         String streamName = (this.streamTitle != null) ? this.streamTitle : "unknown";
         String sourceValue = buildSourceString(stdinMode, format, streamUrl);
@@ -2571,7 +2594,8 @@ public class StreamRecorder {
                 "gateSeconds", gateSecondsValue,
                 "audioDetected", audioDetected,
                 "audioDetectedSeconds", audioDetectedSecondsValue,
-                "audioReason", audioReasonValue);
+                "audioReason", audioReasonValue,
+                "inputBytesPerSecond", inputBytesPerSecond);
         return nowNanos + TimeUnit.MILLISECONDS.toNanos(250L);
     }
 
