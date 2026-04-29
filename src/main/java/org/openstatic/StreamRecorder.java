@@ -1095,6 +1095,14 @@ public class StreamRecorder {
                         }
                     }
                     statusOutputDb = -100.0;
+                    statusRmsDb = 0.0;
+                    statusRmsGateOpen = false;
+                    statusRmsGateSinceNanos = System.nanoTime();
+                    statusGateOpen = false;
+                    statusGateReason = "silence";
+                    statusGateSinceNanos = statusRmsGateSinceNanos;
+                    statusAudioDetected = false;
+                    statusAudioDetectedSinceNanos = statusRmsGateSinceNanos;
                     long idleNowNanos = System.nanoTime();
                     nextStatusEmitNanos = publishStatusIfDue(
                             idleNowNanos,
